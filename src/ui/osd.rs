@@ -4,13 +4,13 @@
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, PointerButton, Pos2, Rect, Shape, Stroke, Vec2};
+use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Shape, Stroke, Vec2};
 
 use super::browse::{self, clock};
 use super::theme::{self, Text};
 use crate::images::Images;
 use crate::jellyfin::Item;
-use crate::player::{Prompt, COUNTDOWN};
+use crate::player::{Prompt, Track, TrackKind, COUNTDOWN};
 
 /// Délai sans activité avant que l'interface ne s'efface.
 const IDLE: Duration = Duration::from_secs(3);
@@ -32,6 +32,7 @@ pub enum Action {
     Accept,
     Dismiss,
     ToggleFullscreen,
+    SelectTrack(TrackKind, Option<i64>),
 }
 
 /// Ce que montre l'interface, lu dans le lecteur à chaque image.
@@ -44,6 +45,9 @@ pub struct View<'a> {
     /// Fin de la partie déjà téléchargée, en secondes.
     pub cache: Option<f64>,
     pub prompt: Option<Prompt<'a>>,
+    /// Pistes, lues seulement quand le panneau « Sous-titres et audio » est ouvert.
+    pub audio: Vec<Track>,
+    pub subtitles: Vec<Track>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -54,6 +58,9 @@ enum Target {
     Forward,
     Accept,
     Dismiss,
+    Tracks,
+    /// Entrée du panneau des pistes : (colonne, ligne).
+    TrackOption(usize, usize),
     Video,
 }
 
@@ -64,11 +71,22 @@ pub struct Osd {
     scrub: Option<f64>,
     /// Élément sous le pointeur au moment de l'appui.
     pressed: Option<Target>,
+    /// Panneau « Sous-titres et audio » ouvert, avec l'entrée sélectionnée au clavier.
+    menu: Option<Focus>,
+}
+
+/// Position dans le panneau des pistes : colonne 0 pour l'audio, 1 pour les sous-titres.
+#[derive(Clone, Copy, PartialEq)]
+struct Focus {
+    column: usize,
+    row: usize,
 }
 
 pub struct Painted {
     pub actions: Vec<Action>,
     pub animating: bool,
+    /// La barre de progression est affichée : les sous-titres doivent passer au-dessus.
+    pub controls_shown: bool,
 }
 
 fn white(alpha: f32) -> Color32 {
@@ -91,7 +109,7 @@ struct Layout {
 
 impl Default for Osd {
     fn default() -> Self {
-        Self { activity: Instant::now(), alpha: 1.0, scrub: None, pressed: None }
+        Self { activity: Instant::now(), alpha: 1.0, scrub: None, pressed: None, menu: None }
     }
 }
 
@@ -99,6 +117,17 @@ impl Osd {
     /// Montre l'interface (touche pressée, souris déplacée, saut…).
     pub fn poke(&mut self) {
         self.activity = Instant::now();
+    }
+
+    /// Le panneau des pistes reçoit alors le clavier à la place de mpv.
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    /// Ouvre le panneau des pistes ; la sélection se placera sur les sous-titres actifs.
+    pub fn open_menu(&mut self) {
+        self.menu = Some(Focus { column: 1, row: usize::MAX });
+        self.poke();
     }
 
     fn layout(screen: Rect, live: bool) -> Layout {
@@ -149,7 +178,11 @@ impl Osd {
             self.poke();
         }
 
-        let visible = view.paused || self.scrub.is_some() || self.activity.elapsed() < IDLE;
+        let menu = self.menu.is_some();
+        if menu {
+            self.menu_keys(ctx, &view, &mut actions);
+        }
+        let visible = view.paused || menu || self.scrub.is_some() || self.activity.elapsed() < IDLE;
         // Fondu vers l'opacité visée, sans la dépasser ni osciller une fois atteinte.
         let target_alpha = if visible { 1.0 } else { 0.0 };
         let step = dt / 0.2;
@@ -163,7 +196,10 @@ impl Osd {
                 hits.push(Hit { rect: layout.bar_zone, target: Target::Bar });
             }
             hits.extend(layout.controls.iter().map(|hit| Hit { rect: hit.rect, target: hit.target }));
+            hits.push(Hit { rect: tracks_button(screen, rem), target: Target::Tracks });
         }
+        let menu_rows = self.menu.map(|focus| menu_rows(screen, rem, &layout, &view, focus)).unwrap_or_default();
+        hits.extend(menu_rows.iter().map(|row| Hit { rect: row.rect, target: row.target }));
         let prompt_hits = prompt_layout(screen, rem, view.prompt.as_ref(), painter);
         hits.extend(prompt_hits.iter().map(|hit| Hit { rect: hit.rect, target: hit.target }));
         let hit_at = |position: Pos2| hits.iter().find(|hit| hit.rect.contains(position)).map(|hit| hit.target);
@@ -190,13 +226,28 @@ impl Osd {
                 Some(Target::PlayPause) if same => actions.push(Action::TogglePause),
                 Some(Target::Accept) if same => actions.push(Action::Accept),
                 Some(Target::Dismiss) if same => actions.push(Action::Dismiss),
+                Some(Target::Tracks) if same => {
+                    if self.menu.is_some() {
+                        self.menu = None;
+                    } else {
+                        self.open_menu();
+                    }
+                }
+                Some(Target::TrackOption(column, row)) if same => {
+                    self.menu = Some(Focus { column, row });
+                    if let Some(action) = track_action(&view, column, row) {
+                        actions.push(action);
+                    }
+                }
+                // Un clic hors du panneau le referme seulement.
+                Some(Target::Video) if hovered.is_none() && self.menu.is_some() => self.menu = None,
                 Some(Target::Video) if hovered.is_none() => actions.push(Action::TogglePause),
                 _ => {}
             }
             self.scrub = None;
         }
         // Le double clic a déjà mis en pause puis relancé : il ne reste qu'à basculer le plein écran.
-        if double && hovered.is_none() {
+        if double && hovered.is_none() && self.menu.is_none() {
             actions.push(Action::ToggleFullscreen);
         }
 
@@ -204,7 +255,13 @@ impl Osd {
             let alpha = self.alpha;
             let shown_position = self.scrub.unwrap_or(view.position);
             paint_shades(painter, screen, rem, alpha);
-            paint_title(painter, screen, rem, view.item, view.live, alpha);
+            paint_title(painter, screen, rem, view.item, view.live, alpha, images);
+            let button = tracks_button(screen, rem);
+            let active = hovered == Some(Target::Tracks) || self.menu.is_some();
+            if active {
+                painter.circle_filled(button.center(), 1.9 * rem, white(alpha * 0.12));
+            }
+            tracks_icon(painter, button.center(), rem, white(alpha * if active { 1.0 } else { 0.85 }));
             for hit in &layout.controls {
                 let active = hovered == Some(hit.target);
                 let color = white(alpha * if active { 1.0 } else { 0.85 });
@@ -232,8 +289,15 @@ impl Osd {
             }
         }
 
+        if let Some(focus) = self.menu {
+            paint_menu(painter, menu_panel(screen, rem, &layout, &view), rem, &menu_rows, focus, hovered);
+        }
         let animating = paint_prompt(painter, screen, rem, view.prompt.as_ref(), &prompt_hits, hovered, images);
-        Painted { actions, animating: animating || (self.alpha > 0.0 && self.alpha < 1.0) || visible }
+        Painted {
+            actions,
+            animating: animating || (self.alpha > 0.0 && self.alpha < 1.0) || visible,
+            controls_shown: visible,
+        }
     }
 }
 
@@ -246,7 +310,16 @@ fn paint_shades(painter: &egui::Painter, screen: Rect, rem: f32, alpha: f32) {
     theme::fade(painter, bottom, false, &[(0.0, 0.0), (1.0, 0.85 * alpha)]);
 }
 
-fn paint_title(painter: &egui::Painter, screen: Rect, rem: f32, item: &Item, live: bool, alpha: f32) {
+/// Logo à gauche du titre quand le serveur en a un, comme sous Kodi.
+fn paint_title(
+    painter: &egui::Painter,
+    screen: Rect,
+    rem: f32,
+    item: &Item,
+    live: bool,
+    alpha: f32,
+    images: &mut Images,
+) {
     let (title, detail) = match (item.kind.as_str(), &item.series_name) {
         ("Episode", Some(series)) => {
             let detail: Vec<String> = [item.episode_code(), Some(item.name.clone())].into_iter().flatten().collect();
@@ -255,8 +328,19 @@ fn paint_title(painter: &egui::Painter, screen: Rect, rem: f32, item: &Item, liv
         _ if live => (item.name.clone(), "En direct".to_owned()),
         _ => (item.name.clone(), item.production_year.map(|year| year.to_string()).unwrap_or_default()),
     };
+    let mut left = screen.left() + GUTTER * rem;
+    let top = screen.top() + 2.4 * rem;
+    if let Some(loaded) = browse::logo(item).and_then(|image| images.get(&image)) {
+        // Mis à l'échelle dans une boîte de 3,8 × 12 rem, centré sur le bloc de texte.
+        let size = loaded.texture.size_vec2();
+        let scale = (3.8 * rem / size.y).min(12.0 * rem / size.x);
+        let logo = Rect::from_min_size(Pos2::new(left, top - 0.1 * rem), size * scale);
+        let appear = (loaded.age / 0.25).min(1.0);
+        theme::image(painter, logo, loaded.texture, 0.0, alpha * appear, 0.5, true);
+        left = logo.right() + 1.4 * rem;
+    }
     let width = screen.width() * 0.6;
-    let mut position = screen.min + Vec2::new(GUTTER, 2.4) * rem;
+    let mut position = Pos2::new(left, top);
     let heading = Text { family: theme::semibold(), ..Text::line(&title, 1.7 * rem, white(alpha), width) };
     position.y += heading.paint(painter, position) + 0.2 * rem;
     Text::line(&detail, 1.05 * rem, theme::DIM.gamma_multiply(alpha), width).paint(painter, position);
@@ -478,5 +562,173 @@ fn paint_prompt(
             button(painter, dismiss, rem, "Voir le générique", false, is(Target::Dismiss));
             animating
         }
+    }
+}
+
+// ------------------------------------------------------------------ sous-titres et audio
+
+const MENU_COLUMN: f32 = 15.0;
+const MENU_ROW: f32 = 2.4;
+const MENU_PADDING: f32 = 1.2;
+const MENU_HEADER: f32 = 2.4;
+
+fn tracks_button(screen: Rect, rem: f32) -> Rect {
+    let size = 3.4 * rem;
+    Rect::from_min_size(Pos2::new(screen.right() - GUTTER * rem - size, screen.top() + 2.2 * rem), Vec2::splat(size))
+}
+
+/// Bulle de dialogue avec deux lignes de texte.
+fn tracks_icon(painter: &egui::Painter, center: Pos2, rem: f32, color: Color32) {
+    let stroke = Stroke::new(0.14 * rem, color);
+    let body = Rect::from_center_size(center - Vec2::new(0.0, 0.15 * rem), Vec2::new(1.9, 1.35) * rem);
+    painter.rect_stroke(body, theme::corner(0.25 * rem), stroke, egui::StrokeKind::Middle);
+    let tail = vec![
+        Pos2::new(body.left() + 0.45 * rem, body.bottom()),
+        Pos2::new(body.left() + 0.4 * rem, body.bottom() + 0.45 * rem),
+        Pos2::new(body.left() + 0.9 * rem, body.bottom()),
+    ];
+    painter.add(Shape::line(tail, stroke));
+    for (row, width) in [(-0.2, 1.05), (0.2, 0.65)] {
+        let y = body.center().y + row * rem;
+        let x = body.left() + 0.42 * rem;
+        painter.line_segment([Pos2::new(x, y), Pos2::new(x + width * rem, y)], stroke);
+    }
+}
+
+fn check_icon(painter: &egui::Painter, center: Pos2, rem: f32, color: Color32) {
+    let unit = 0.16 * rem;
+    let points = [(-2.2, 0.1), (-0.7, 1.6), (2.3, -1.7)].map(|(x, y)| center + Vec2::new(x, y) * unit);
+    painter.add(Shape::line(points.to_vec(), Stroke::new(0.14 * rem, color)));
+}
+
+/// Entrées d'une colonne : libellé, piste visée (`None` : désactiver), active ou non.
+fn entries(view: &View, column: usize) -> Vec<(String, Option<i64>, bool)> {
+    let tracks = if column == 0 { &view.audio } else { &view.subtitles };
+    let mut entries: Vec<_> =
+        tracks.iter().map(|track| (track.label.clone(), Some(track.id), track.selected)).collect();
+    if column == 1 {
+        let none = !tracks.iter().any(|track| track.selected);
+        entries.insert(0, ("Désactivés".to_owned(), None, none));
+    }
+    entries
+}
+
+fn track_action(view: &View, column: usize, row: usize) -> Option<Action> {
+    let (_, id, _) = entries(view, column).into_iter().nth(row)?;
+    let kind = if column == 0 { TrackKind::Audio } else { TrackKind::Subtitle };
+    Some(Action::SelectTrack(kind, id))
+}
+
+struct MenuRow {
+    rect: Rect,
+    target: Target,
+    label: String,
+    selected: bool,
+}
+
+/// Lignes visibles du panneau. Chaque colonne défile pour garder visible l'entrée
+/// sélectionnée au clavier, ou à défaut la piste active.
+fn menu_rows(screen: Rect, rem: f32, layout: &Layout, view: &View, focus: Focus) -> Vec<MenuRow> {
+    let panel = menu_panel(screen, rem, layout, view);
+    let visible = visible_rows(panel, rem);
+    let mut rows = Vec::new();
+    for column in 0..2 {
+        let entries = entries(view, column);
+        let anchor = match focus.column == column {
+            true => focus.row,
+            false => entries.iter().position(|(_, _, selected)| *selected).unwrap_or(0),
+        };
+        let offset = anchor.saturating_sub(visible.saturating_sub(1)).min(entries.len().saturating_sub(visible));
+        let x = panel.left() + (MENU_PADDING + column as f32 * (MENU_COLUMN + 1.0)) * rem;
+        for (index, (label, _, selected)) in entries.into_iter().enumerate().skip(offset).take(visible) {
+            let y = panel.top() + (MENU_PADDING + MENU_HEADER) * rem + (index - offset) as f32 * MENU_ROW * rem;
+            let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(MENU_COLUMN, MENU_ROW) * rem);
+            rows.push(MenuRow { rect, target: Target::TrackOption(column, index), label, selected });
+        }
+    }
+    rows
+}
+
+fn visible_rows(panel: Rect, rem: f32) -> usize {
+    let room = panel.height() / rem - 2.0 * MENU_PADDING - MENU_HEADER;
+    (room / MENU_ROW).floor().max(1.0) as usize
+}
+
+fn menu_panel(screen: Rect, rem: f32, layout: &Layout, view: &View) -> Rect {
+    let longest = entries(view, 0).len().max(entries(view, 1).len()).max(1);
+    let top = tracks_button(screen, rem).bottom() + 0.6 * rem;
+    let room = layout.bar.top() - 3.0 * rem - top;
+    let wanted = (2.0 * MENU_PADDING + MENU_HEADER + longest as f32 * MENU_ROW) * rem;
+    let width = (2.0 * MENU_PADDING + 2.0 * MENU_COLUMN + 1.0) * rem;
+    let right = screen.right() - GUTTER * rem;
+    Rect::from_min_size(Pos2::new(right - width, top), Vec2::new(width, wanted.min(room)))
+}
+
+fn paint_menu(painter: &egui::Painter, panel: Rect, rem: f32, rows: &[MenuRow], focus: Focus, hovered: Option<Target>) {
+    painter.rect_filled(panel, theme::corner(0.6 * rem), Color32::from_rgba_unmultiplied(20, 20, 22, 240));
+    for (column, title) in ["Audio", "Sous-titres"].into_iter().enumerate() {
+        let x = panel.left() + (MENU_PADDING + column as f32 * (MENU_COLUMN + 1.0) + 0.8) * rem;
+        let heading =
+            Text { family: theme::semibold(), ..Text::line(title, 0.95 * rem, theme::DIM, MENU_COLUMN * rem) };
+        heading.paint(painter, Pos2::new(x, panel.top() + (MENU_PADDING + 0.3) * rem));
+    }
+    for row in rows {
+        let Target::TrackOption(column, index) = row.target else { continue };
+        if hovered == Some(row.target) || (focus.column, focus.row) == (column, index) {
+            painter.rect_filled(row.rect, theme::corner(0.35 * rem), white(0.12));
+        }
+        if row.selected {
+            check_icon(painter, Pos2::new(row.rect.left() + 1.1 * rem, row.rect.center().y), rem, theme::TEXT);
+        }
+        let (color, family) =
+            if row.selected { (theme::TEXT, theme::semibold()) } else { (theme::DIM, egui::FontFamily::Proportional) };
+        let text = Text { family, ..Text::line(&row.label, rem, color, row.rect.width() - 2.8 * rem) };
+        let height = text.layout(painter).size().y;
+        text.paint(painter, Pos2::new(row.rect.left() + 2.2 * rem, row.rect.center().y - height / 2.0));
+    }
+}
+
+impl Osd {
+    /// Clavier du panneau des pistes : flèches, Entrée pour choisir, Échap ou `c` pour fermer.
+    fn menu_keys(&mut self, ctx: &egui::Context, view: &View, actions: &mut Vec<Action>) {
+        let Some(mut focus) = self.menu else { return };
+        // À l'ouverture, la sélection se place sur la piste active. Les touches de cette image
+        // ont servi à ouvrir le panneau (`c`) : elles ne doivent pas le refermer aussitôt.
+        if focus.row == usize::MAX {
+            focus.row = entries(view, focus.column).iter().position(|(_, _, selected)| *selected).unwrap_or(0);
+            self.menu = Some(focus);
+            return;
+        }
+        let (keys, close) = ctx.input(|input| {
+            let keys = [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight, Key::Enter]
+                .map(|key| input.key_pressed(key));
+            let typed_c = input.events.iter().any(|event| matches!(event, egui::Event::Text(text) if text == "c"));
+            (keys, input.key_pressed(Key::Escape) || input.key_pressed(Key::Backspace) || typed_c)
+        });
+        let [up, down, left, right, enter] = keys;
+        if keys.iter().any(|pressed| *pressed) || close {
+            self.poke();
+        }
+        if close {
+            self.menu = None;
+            return;
+        }
+        if left || right {
+            focus.column = usize::from(right);
+            focus.row = entries(view, focus.column).iter().position(|(_, _, selected)| *selected).unwrap_or(0);
+        }
+        let count = entries(view, focus.column).len();
+        if up {
+            focus.row = focus.row.saturating_sub(1);
+        }
+        if down {
+            focus.row = (focus.row + 1).min(count.saturating_sub(1));
+        }
+        if enter {
+            if let Some(action) = track_action(view, focus.column, focus.row) {
+                actions.push(action);
+            }
+        }
+        self.menu = Some(focus);
     }
 }

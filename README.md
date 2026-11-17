@@ -77,13 +77,16 @@ de zapper avec « suivant » et « précédent ».
 ### Lecture
 
 jf affiche sa propre interface de lecture au mouvement de la souris ou à l'appui
-d'une touche : titre, recul et avance de 10 secondes, pause, barre de progression
-cliquable. Un clic met en pause, un double clic bascule le plein écran.
+d'une touche : logo et titre (logo du film, de la série ou de la chaîne quand Jellyfin
+en a un), recul et avance de 10 secondes, pause, barre de progression cliquable, et un
+bouton « Sous-titres et audio ». Un clic met en pause, un double clic bascule le plein
+écran. Les sous-titres remontent au-dessus de la barre tant qu'elle est affichée.
 
 | Touche | Action |
 |---|---|
 | `Entrée` | valider « Passer l'intro » ou « Épisode suivant », sinon pause |
 | `Échap`, `Retour arrière`, `q` | écarter le compte à rebours, sinon arrêter (la position est conservée) |
+| `c` | panneau « Sous-titres et audio » : flèches pour choisir, `Entrée` pour valider, `Échap` pour fermer |
 | autres touches | transmises à mpv : `Espace`, flèches, `j` pour les sous-titres, `#` pour l'audio… |
 
 **Passer l'intro** apparaît pendant le générique de début (et « Passer le récap »

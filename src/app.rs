@@ -73,6 +73,8 @@ pub struct App {
     images: Images,
     player: Player,
     osd: Osd,
+    /// Position des sous-titres réglée par l'utilisateur, pendant qu'ils sont remontés.
+    raised_subtitles: Option<f64>,
     remote_state: remote::Shared,
     remote_inbox: Receiver<remote::Command>,
 
@@ -115,6 +117,7 @@ impl App {
             images: Images::new(ctx),
             player: Player::new(mpv),
             osd: Osd::default(),
+            raised_subtitles: None,
             remote_state: remote_state.clone(),
             remote_inbox,
             login: Login::new(&config.server),
@@ -274,6 +277,7 @@ impl App {
     }
 
     fn stop_playback(&mut self) {
+        self.raise_subtitles(false);
         self.player.stop();
         self.refresh();
     }
@@ -605,16 +609,22 @@ impl App {
     fn playback(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         playback::paint_video(ui, &self.player.mpv, self.player.is_loading());
-        let input = playback::forward_input(&ctx, &self.player.mpv);
-        if input.activity {
-            self.osd.poke();
-        }
-        if input.back && !self.player.dismiss() {
-            self.stop_playback();
-            return;
-        }
-        if input.ok && !self.player.accept(&self.tasks) {
-            let _ = self.player.mpv.command(&["cycle", "pause"]);
+        // Panneau des pistes ouvert : c'est lui qui reçoit le clavier, pas mpv.
+        if !self.osd.menu_open() {
+            let input = playback::forward_input(&ctx, &self.player.mpv);
+            if input.activity {
+                self.osd.poke();
+            }
+            if input.back && !self.player.dismiss() {
+                self.stop_playback();
+                return;
+            }
+            if input.ok && !self.player.accept(&self.tasks) {
+                let _ = self.player.mpv.command(&["cycle", "pause"]);
+            }
+            if input.tracks {
+                self.osd.open_menu();
+            }
         }
 
         let Some(item) = self.player.queued() else { return };
@@ -627,8 +637,11 @@ impl App {
             live,
             cache: self.player.mpv.get_f64("demuxer-cache-time"),
             prompt: self.player.prompt(),
+            audio: if self.osd.menu_open() { self.player.tracks(TrackKind::Audio) } else { Vec::new() },
+            subtitles: if self.osd.menu_open() { self.player.tracks(TrackKind::Subtitle) } else { Vec::new() },
         };
         let painted = self.osd.paint(ui, view, &mut self.images);
+        self.raise_subtitles(painted.controls_shown);
         for action in painted.actions {
             self.osd.poke();
             let mpv = &self.player.mpv;
@@ -651,6 +664,7 @@ impl App {
                 osd::Action::Dismiss => {
                     self.player.dismiss();
                 }
+                osd::Action::SelectTrack(kind, id) => self.player.select_track(kind, id),
             }
         }
         // Rafraîchit l'interface et l'état de la télécommande même en pause.
@@ -658,6 +672,25 @@ impl App {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    /// Remonte les sous-titres au-dessus de la barre de progression tant qu'elle est affichée,
+    /// puis rend la position réglée par l'utilisateur (`sub-pos` de son mpv.conf).
+    fn raise_subtitles(&mut self, raise: bool) {
+        const LIFT: f64 = 12.0;
+        let mpv = &self.player.mpv;
+        match (raise, self.raised_subtitles) {
+            (true, None) => {
+                let base = mpv.get_f64("sub-pos").unwrap_or(100.0);
+                mpv.set("sub-pos", &(base - LIFT).max(0.0).to_string());
+                self.raised_subtitles = Some(base);
+            }
+            (false, Some(base)) => {
+                mpv.set("sub-pos", &base.to_string());
+                self.raised_subtitles = None;
+            }
+            _ => {}
         }
     }
 

@@ -19,6 +19,8 @@ pub struct Input {
     pub ok: bool,
     /// Une touche a été pressée : l'interface de lecture se montre.
     pub activity: bool,
+    /// `c` : panneau « Sous-titres et audio ».
+    pub tracks: bool,
 }
 
 pub fn paint_video(ui: &egui::Ui, mpv: &Mpv, loading: bool) {
@@ -105,6 +107,7 @@ pub fn forward_input(ctx: &egui::Context, mpv: &Mpv) -> Input {
                 for character in text.chars() {
                     match character {
                         'q' | 'Q' => input.back = true,
+                        'c' => input.tracks = true,
                         ' ' => press("SPACE"),
                         '#' => press("SHARP"),
                         _ => press(&character.to_string()),

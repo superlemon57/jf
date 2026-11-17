@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::config::Config;
 
 const ITEM_QUERY: [(&str, &str); 3] =
-    [("Fields", "Overview"), ("ImageTypeLimit", "1"), ("EnableImageTypes", "Primary,Backdrop")];
+    [("Fields", "Overview"), ("ImageTypeLimit", "1"), ("EnableImageTypes", "Primary,Backdrop,Logo")];
 const TEXT_SUBTITLES: [(&str, &str); 6] =
     [("subrip", "srt"), ("srt", "srt"), ("ass", "ass"), ("ssa", "ssa"), ("webvtt", "vtt"), ("vtt", "vtt")];
 
@@ -130,6 +130,8 @@ pub struct Item {
     pub album_id: Option<String>,
     pub album_primary_image_tag: Option<String>,
     pub parent_backdrop_item_id: Option<String>,
+    pub parent_logo_item_id: Option<String>,
+    pub parent_logo_image_tag: Option<String>,
     pub channel_number: Option<String>,
     pub current_program: Option<Program>,
     #[serde(deserialize_with = "or_default")]

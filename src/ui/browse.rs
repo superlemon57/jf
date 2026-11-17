@@ -363,6 +363,19 @@ fn backdrop_image(item: &Item) -> Option<ImageRef> {
     reference(parent, "Backdrop", 1920, None)
 }
 
+/// Logo du contenu (titre stylisé sur fond transparent) : celui du film, de la série
+/// pour un épisode, ou l'image d'une chaîne, qui est son logo.
+pub fn logo(item: &Item) -> Option<ImageRef> {
+    if item.is_channel() {
+        return reference(&item.id, "Primary", 400, item.image_tags.get("Primary"));
+    }
+    if let Some(tag) = item.image_tags.get("Logo") {
+        return reference(&item.id, "Logo", 600, Some(tag));
+    }
+    let tag = item.parent_logo_image_tag.as_ref()?;
+    reference(item.parent_logo_item_id.as_ref()?, "Logo", 600, Some(tag))
+}
+
 /// Vignette 16:9 d'un épisode, pour la carte « Épisode suivant ».
 pub fn still(item: &Item) -> Option<ImageRef> {
     thumbnail(item, Shape::Wide)
