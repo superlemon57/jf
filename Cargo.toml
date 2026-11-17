@@ -1,0 +1,19 @@
+[package]
+name = "jf"
+version = "0.2.0"
+edition = "2021"
+description = "Client Jellyfin natif pour le salon, avec mpv intégré"
+repository = "https://github.com/superlemon57/jf"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+ureq = { version = "2", features = ["json"] }
+
+[profile.release]
+lto = "thin"
+strip = true
