@@ -6,6 +6,12 @@ struct Track: Codable, Identifiable, Equatable {
     let selected: Bool
 }
 
+/// Proposition affichée par jf : passage à sauter (`skip`) ou épisode suivant (`next`).
+struct Prompt: Codable, Equatable {
+    let kind: String
+    let label: String
+}
+
 /// État de la lecture, tel que renvoyé par `GET /api/state`.
 struct PlayerState: Codable, Equatable {
     var playing = false
@@ -18,9 +24,10 @@ struct PlayerState: Codable, Equatable {
     var hasPrevious = false
     var audio: [Track] = []
     var subtitles: [Track] = []
+    var prompt: Prompt?
 
     enum CodingKeys: String, CodingKey {
-        case playing, paused, live, title, position, duration, audio, subtitles
+        case playing, paused, live, title, position, duration, audio, subtitles, prompt
         case hasNext = "has_next"
         case hasPrevious = "has_previous"
     }

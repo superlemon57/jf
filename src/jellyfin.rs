@@ -149,6 +149,25 @@ struct ItemList {
     items: Vec<Item>,
 }
 
+/// Passage repéré dans un épisode (générique de début, récapitulatif, générique de fin).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct MediaSegment {
+    #[serde(rename = "Type", deserialize_with = "or_default")]
+    pub kind: String,
+    #[serde(deserialize_with = "or_default")]
+    pub start_ticks: i64,
+    #[serde(deserialize_with = "or_default")]
+    pub end_ticks: i64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+struct SegmentList {
+    #[serde(deserialize_with = "or_default")]
+    items: Vec<MediaSegment>,
+}
+
 pub fn ticks_to_seconds(ticks: i64) -> f64 {
     ticks as f64 / 1e7
 }
@@ -415,6 +434,16 @@ impl Client {
                 ("Limit", "300"),
             ],
         )
+    }
+
+    /// L'épisode donné et ceux qui le suivent dans la série.
+    pub fn episodes_from(&self, series_id: &str, episode_id: &str) -> Result<Vec<Item>> {
+        self.items(&format!("/Shows/{series_id}/Episodes"), &[("startItemId", episode_id), ("Limit", "50")])
+    }
+
+    /// Passages repérés par le serveur (Jellyfin 10.10 et plus, avec un plugin comme Intro Skipper).
+    pub fn segments(&self, id: &str) -> Result<Vec<MediaSegment>> {
+        Ok(self.get::<SegmentList>(&format!("/MediaSegments/{id}"), &[])?.items)
     }
 
     pub fn item_with_sources(&self, id: &str) -> Result<Item> {

@@ -11,10 +11,11 @@ use crate::config::{self, Config};
 use crate::images::Images;
 use crate::jellyfin::{Client, Item};
 use crate::mpv::{self, Mpv};
-use crate::player::{Outcome, Player, Stream, TrackKind};
+use crate::player::{Outcome, Player, Prompt, Stream, TrackKind};
 use crate::remote;
 use crate::ui::browse::{self, Backdrop, Direction, Page, Section, Source};
 use crate::ui::login::{self, Login};
+use crate::ui::osd::{self, Osd};
 use crate::ui::overlay::{self, Action, Menu};
 use crate::ui::{playback, theme};
 
@@ -26,6 +27,8 @@ const QUICK_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 pub enum Message {
     Page(u64, Result<Vec<Section>, String>),
     Resolved(u64, Result<Box<Stream>, String>),
+    /// Suite de la série pour un épisode lancé seul.
+    Episodes(u64, Result<Vec<Item>, String>),
     Shuffled(Result<Vec<Item>, String>),
     PlayedSaved(Result<(), String>),
     QuickConnectCode(String),
@@ -69,6 +72,7 @@ pub struct App {
     inbox: Receiver<Message>,
     images: Images,
     player: Player,
+    osd: Osd,
     remote_state: remote::Shared,
     remote_inbox: Receiver<remote::Command>,
 
@@ -110,6 +114,7 @@ impl App {
             inbox,
             images: Images::new(ctx),
             player: Player::new(mpv),
+            osd: Osd::default(),
             remote_state: remote_state.clone(),
             remote_inbox,
             login: Login::new(&config.server),
@@ -303,7 +308,9 @@ impl App {
                 Message::Resolved(generation, result) => {
                     let outcome = self.player.on_resolved(generation, result);
                     self.on_outcome(outcome);
+                    self.osd.poke();
                 }
+                Message::Episodes(request, result) => self.player.on_episodes(request, result),
                 Message::Shuffled(Ok(items)) if items.is_empty() => self.show_toast("Rien à lire ici."),
                 Message::Shuffled(Ok(items)) => {
                     self.toast = None;
@@ -348,7 +355,7 @@ impl App {
                 }
             }
         }
-        self.player.tick();
+        self.player.tick(&self.tasks);
     }
 
     fn process_remote(&mut self) {
@@ -362,7 +369,15 @@ impl App {
                 remote::Command::SeekBy(offset) => mpv(&["seek", &offset.to_string(), "relative"]),
                 remote::Command::Track(kind, id) => self.player.select_track(kind, id),
                 remote::Command::Key(key) if playing => match key.as_str() {
-                    "ok" | "playpause" => mpv(&["cycle", "pause"]),
+                    "ok" => {
+                        if !self.player.accept(&self.tasks) {
+                            let _ = self.player.mpv.command(&["cycle", "pause"]);
+                        }
+                    }
+                    "skip" => {
+                        self.player.accept(&self.tasks);
+                    }
+                    "playpause" => mpv(&["cycle", "pause"]),
                     "play" => self.player.mpv.set("pause", "no"),
                     "pause" => self.player.mpv.set("pause", "yes"),
                     "left" => mpv(&["seek", "-10"]),
@@ -371,7 +386,12 @@ impl App {
                     "up" => mpv(&["seek", "60"]),
                     "next" => self.player.skip(1, &self.tasks),
                     "previous" => self.player.skip(-1, &self.tasks),
-                    "back" | "stop" => self.stop_playback(),
+                    "back" => {
+                        if !self.player.dismiss() {
+                            self.stop_playback();
+                        }
+                    }
+                    "stop" => self.stop_playback(),
                     _ => {}
                 },
                 remote::Command::Key(key) => {
@@ -418,6 +438,12 @@ impl App {
                 has_previous: self.player.has_previous(),
                 audio: self.player.tracks(TrackKind::Audio),
                 subtitles: self.player.tracks(TrackKind::Subtitle),
+                prompt: self.player.prompt().map(|prompt| match prompt {
+                    Prompt::Skip { label, .. } => remote::RemotePrompt { kind: "skip", label: label.to_owned() },
+                    Prompt::NextUp { .. } => {
+                        remote::RemotePrompt { kind: "next", label: "Épisode suivant".to_owned() }
+                    }
+                }),
                 artwork: browse::artwork(item).map(|image| (image, client.clone())),
             };
         }
@@ -576,6 +602,65 @@ impl App {
         }
     }
 
+    fn playback(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        playback::paint_video(ui, &self.player.mpv, self.player.is_loading());
+        let input = playback::forward_input(&ctx, &self.player.mpv);
+        if input.activity {
+            self.osd.poke();
+        }
+        if input.back && !self.player.dismiss() {
+            self.stop_playback();
+            return;
+        }
+        if input.ok && !self.player.accept(&self.tasks) {
+            let _ = self.player.mpv.command(&["cycle", "pause"]);
+        }
+
+        let Some(item) = self.player.queued() else { return };
+        let (position, duration, paused, live) = self.player.progress().unwrap_or_default();
+        let view = osd::View {
+            item,
+            position,
+            duration,
+            paused,
+            live,
+            cache: self.player.mpv.get_f64("demuxer-cache-time"),
+            prompt: self.player.prompt(),
+        };
+        let painted = self.osd.paint(ui, view, &mut self.images);
+        for action in painted.actions {
+            self.osd.poke();
+            let mpv = &self.player.mpv;
+            match action {
+                osd::Action::TogglePause => {
+                    let _ = mpv.command(&["cycle", "pause"]);
+                }
+                osd::Action::SeekTo(time) => {
+                    let _ = mpv.command(&["seek", &time.to_string(), "absolute"]);
+                }
+                osd::Action::SeekBy(offset) => {
+                    let _ = mpv.command(&["seek", &offset.to_string(), "relative"]);
+                }
+                osd::Action::ToggleFullscreen => {
+                    let _ = mpv.command(&["cycle", "fullscreen"]);
+                }
+                osd::Action::Accept => {
+                    self.player.accept(&self.tasks);
+                }
+                osd::Action::Dismiss => {
+                    self.player.dismiss();
+                }
+            }
+        }
+        // Rafraîchit l'interface et l'état de la télécommande même en pause.
+        if painted.animating {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
     fn hide_idle_cursor(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.pointer.is_moving() || input.pointer.any_down()) {
             self.pointer_moved = Instant::now();
@@ -601,12 +686,7 @@ impl eframe::App for App {
                     self.start_login(request);
                 }
             } else if self.player.is_active() {
-                playback::paint_video(ui, &self.player.mpv, self.player.is_loading());
-                if let playback::Input::Stop = playback::forward_input(ctx, &self.player.mpv) {
-                    self.stop_playback();
-                }
-                // Garde l'état de la télécommande à jour même en pause.
-                ctx.request_repaint_after(Duration::from_millis(250));
+                self.playback(ui);
             } else {
                 self.browse(ui);
             }

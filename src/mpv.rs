@@ -185,7 +185,9 @@ impl Mpv {
             ("config", "yes".into()),
             ("vo", "libmpv".into()),
             ("hwdec", "auto-safe".into()),
-            ("osc", "yes".into()),
+            // jf dessine sa propre interface de lecture.
+            ("osc", "no".into()),
+            ("osd-bar", "no".into()),
             ("input-default-bindings", "yes".into()),
             ("idle", "yes".into()),
             ("ytdl", "no".into()),

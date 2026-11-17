@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::app::{Message, Tasks};
-use crate::jellyfin::{Client, Item, Subtitle};
+use crate::jellyfin::{ticks_to_seconds, Client, Item, Subtitle};
 use crate::mpv::{Event, Mpv};
 
 const LANGUAGES: [(&str, &str); 12] = [
@@ -25,6 +25,32 @@ const LANGUAGES: [(&str, &str); 12] = [
     ("zho", "Chinois"),
 ];
 
+/// Durée du compte à rebours avant l'épisode suivant, en secondes de lecture.
+pub const COUNTDOWN: f64 = 10.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum SegmentKind {
+    Intro,
+    Recap,
+    Outro,
+}
+
+#[derive(Clone, Copy)]
+struct Segment {
+    kind: SegmentKind,
+    start: f64,
+    end: f64,
+}
+
+/// Proposition affichée pendant la lecture, validée par Entrée ou la télécommande.
+#[derive(Clone, Copy)]
+pub enum Prompt<'a> {
+    /// Sauter un passage jusqu'à `end`.
+    Skip { label: &'static str, end: f64 },
+    /// Compte à rebours avant l'élément suivant de la file.
+    NextUp { item: &'a Item, remaining: f64 },
+}
+
 /// Tout ce qu'il faut pour lancer un élément dans mpv.
 pub struct Stream {
     item: Item,
@@ -35,6 +61,7 @@ pub struct Stream {
     start: f64,
     source_id: String,
     subtitles: Vec<Subtitle>,
+    segments: Vec<Segment>,
     live: bool,
 }
 
@@ -43,6 +70,9 @@ struct Current {
     source_id: String,
     live: bool,
     subtitles: Vec<Subtitle>,
+    segments: Vec<Segment>,
+    /// L'utilisateur a choisi de regarder le générique : pas de compte à rebours.
+    credits_watched: bool,
     /// Identifiant mpv du fichier, pour ignorer les événements d'un fichier précédent.
     entry: Option<i64>,
     loaded: bool,
@@ -82,6 +112,8 @@ pub struct Player {
     resolving: bool,
     /// Incrémenté à chaque demande, pour écarter les résolutions devenues obsolètes.
     generation: u64,
+    /// Demande en cours de la suite de la série, pour un épisode lancé seul.
+    queue_request: u64,
 }
 
 fn resolve(client: &Client, item: &Item, from_start: bool) -> Result<Stream, String> {
@@ -110,6 +142,7 @@ fn resolve(client: &Client, item: &Item, from_start: bool) -> Result<Stream, Str
             start: 0.0,
             source_id: source.id,
             subtitles: Vec::new(),
+            segments: Vec::new(),
             live: true,
         });
     }
@@ -118,7 +151,23 @@ fn resolve(client: &Client, item: &Item, from_start: bool) -> Result<Stream, Str
     let source = full.media_sources.first().cloned().unwrap_or_default();
     let source_id = if source.id.is_empty() { full.id.clone() } else { source.id.clone() };
     let kind = if full.is_audio() { "Audio" } else { "Videos" };
+    // Facultatif : un serveur sans segments renvoie une erreur ou une liste vide.
+    let segments = client.segments(&full.id).unwrap_or_default();
+    let segments = segments
+        .into_iter()
+        .filter_map(|segment| {
+            let kind = match segment.kind.as_str() {
+                "Intro" => SegmentKind::Intro,
+                "Recap" => SegmentKind::Recap,
+                "Outro" => SegmentKind::Outro,
+                _ => return None,
+            };
+            let (start, end) = (ticks_to_seconds(segment.start_ticks), ticks_to_seconds(segment.end_ticks));
+            (end > start).then_some(Segment { kind, start, end })
+        })
+        .collect();
     Ok(Stream {
+        segments,
         url: format!("{}/{kind}/{}/stream?static=true&mediaSourceId={source_id}", client.server, full.id),
         header: Some(client.stream_header()),
         user_agent: None,
@@ -139,7 +188,17 @@ impl Player {
                 let _ = client.report(event, body);
             }
         });
-        Self { mpv, client: None, reports, queue: Vec::new(), index: 0, current: None, resolving: false, generation: 0 }
+        Self {
+            mpv,
+            client: None,
+            reports,
+            queue: Vec::new(),
+            index: 0,
+            current: None,
+            resolving: false,
+            generation: 0,
+            queue_request: 0,
+        }
     }
 
     pub fn set_client(&mut self, client: Option<Client>) {
@@ -159,6 +218,26 @@ impl Player {
         self.finish_current();
         self.queue = queue;
         self.load(index, from_start, tasks);
+        self.queue_request += 1;
+        // Un épisode lancé seul (Reprendre, À suivre, recherche) enchaîne sur la suite de la série.
+        if let ([item], Some(client)) = (self.queue.as_slice(), self.client.clone()) {
+            if let (true, Some(series)) = (item.kind == "Episode", item.series_id.clone()) {
+                let (request, id) = (self.queue_request, item.id.clone());
+                tasks.spawn(move || {
+                    let episodes = client.episodes_from(&series, &id).map_err(|error| error.to_string());
+                    Message::Episodes(request, episodes)
+                });
+            }
+        }
+    }
+
+    /// Complète la file d'un épisode lancé seul avec les épisodes suivants.
+    pub fn on_episodes(&mut self, request: u64, result: Result<Vec<Item>, String>) {
+        let (Ok(episodes), true) = (result, request == self.queue_request) else { return };
+        let [first] = self.queue.as_slice() else { return };
+        if let Some(position) = episodes.iter().position(|episode| episode.id == first.id) {
+            self.queue.extend(episodes.into_iter().skip(position + 1));
+        }
     }
 
     fn load(&mut self, index: usize, from_start: bool, tasks: &Tasks) {
@@ -194,6 +273,8 @@ impl Player {
             source_id: stream.source_id,
             live: stream.live,
             subtitles: stream.subtitles,
+            segments: stream.segments,
+            credits_watched: false,
             entry: None,
             loaded: false,
             position: stream.start,
@@ -289,8 +370,75 @@ impl Player {
         Outcome::Continue
     }
 
-    /// Relit la position depuis mpv et envoie un rapport de progression toutes les 10 secondes.
-    pub fn tick(&mut self) {
+    /// Moment où commence le compte à rebours de l'élément suivant : le générique de fin
+    /// s'il est connu, sinon les dernières secondes (la fin du fichier enchaîne de toute façon).
+    fn next_up_start(&self, current: &Current) -> Option<f64> {
+        if current.live || !self.has_next() || current.duration <= 0.0 {
+            return None;
+        }
+        let outro = current.segments.iter().find(|segment| segment.kind == SegmentKind::Outro);
+        match outro {
+            Some(outro) if current.duration - outro.start > 2.0 => Some(outro.start),
+            _ if current.duration > 2.0 * COUNTDOWN => Some(current.duration - COUNTDOWN),
+            _ => None,
+        }
+    }
+
+    pub fn prompt(&self) -> Option<Prompt<'_>> {
+        let current = self.current.as_ref().filter(|current| current.loaded)?;
+        let position = current.position;
+        if let (Some(start), false) = (self.next_up_start(current), current.credits_watched) {
+            if position >= start {
+                let item = self.queue.get(self.index + 1)?;
+                return Some(Prompt::NextUp { item, remaining: (start + COUNTDOWN - position).max(0.0) });
+            }
+        }
+        current.segments.iter().find_map(|segment| {
+            let label = match segment.kind {
+                SegmentKind::Intro => "Passer l'intro",
+                SegmentKind::Recap => "Passer le récap",
+                SegmentKind::Outro => return None,
+            };
+            // Plus rien à sauter dans la dernière seconde du passage.
+            (position >= segment.start && position < segment.end - 1.0)
+                .then_some(Prompt::Skip { label, end: segment.end })
+        })
+    }
+
+    /// Valide la proposition affichée ; renvoie faux s'il n'y en a pas.
+    pub fn accept(&mut self, tasks: &Tasks) -> bool {
+        match self.prompt() {
+            Some(Prompt::Skip { end, .. }) => {
+                let _ = self.mpv.command(&["seek", &end.to_string(), "absolute"]);
+                true
+            }
+            Some(Prompt::NextUp { .. }) => {
+                self.skip(1, tasks);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Écarte le compte à rebours pour regarder le générique ; renvoie faux s'il n'y en a pas.
+    pub fn dismiss(&mut self) -> bool {
+        if !matches!(self.prompt(), Some(Prompt::NextUp { .. })) {
+            return false;
+        }
+        if let Some(current) = &mut self.current {
+            current.credits_watched = true;
+        }
+        true
+    }
+
+    /// Élément en cours, ou en cours de chargement.
+    pub fn queued(&self) -> Option<&Item> {
+        self.item().or(self.queue.get(self.index))
+    }
+
+    /// Relit la position depuis mpv, gère le compte à rebours et envoie un rapport
+    /// de progression toutes les 10 secondes.
+    pub fn tick(&mut self, tasks: &Tasks) {
         let Some(current) = &mut self.current else { return };
         if !current.loaded {
             return;
@@ -306,6 +454,19 @@ impl Player {
             current.last_report = Instant::now();
             let current = self.current.as_ref().expect("lecture en cours");
             self.report("/Progress", current);
+        }
+
+        let current = self.current.as_ref().expect("lecture en cours");
+        let (position, paused) = (current.position, current.paused);
+        // Revenir avant le générique relance le compte à rebours la fois suivante.
+        let rewound = self.next_up_start(current).is_some_and(|start| position < start - 1.0);
+        if rewound {
+            self.current.as_mut().expect("lecture en cours").credits_watched = false;
+        }
+        if let Some(Prompt::NextUp { remaining, .. }) = self.prompt() {
+            if remaining <= 0.0 && !paused {
+                self.skip(1, tasks);
+            }
         }
     }
 

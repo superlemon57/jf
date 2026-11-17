@@ -1,18 +1,24 @@
-//! Écran de lecture : la vidéo de mpv remplit la fenêtre, et le clavier
-//! comme la souris lui sont transmis (ses raccourcis et son interface s'appliquent).
+//! Écran de lecture : la vidéo de mpv remplit la fenêtre et le clavier lui est transmis
+//! (ses raccourcis et l'`input.conf` de l'utilisateur s'appliquent). La souris est
+//! gérée par l'interface de lecture de jf (`osd`).
 
 use std::sync::Arc;
 
-use eframe::egui::{self, Event, Key, Modifiers, PointerButton};
+use eframe::egui::{self, Event, Key, Modifiers};
 use eframe::glow::{self, HasContext};
 
 use super::theme::{self, Text};
 use crate::mpv::Mpv;
 
-pub enum Input {
-    None,
-    /// L'utilisateur a demandé l'arrêt (Échap, Retour arrière ou q).
-    Stop,
+/// Touches que jf garde pour lui au lieu de les passer à mpv.
+#[derive(Default)]
+pub struct Input {
+    /// Échap, Retour arrière ou q : écarter le compte à rebours, sinon arrêter.
+    pub back: bool,
+    /// Entrée : valider la proposition affichée, sinon pause.
+    pub ok: bool,
+    /// Une touche a été pressée : l'interface de lecture se montre.
+    pub activity: bool,
 }
 
 pub fn paint_video(ui: &egui::Ui, mpv: &Mpv, loading: bool) {
@@ -73,13 +79,19 @@ fn with_modifiers(modifiers: Modifiers, name: &str) -> String {
 }
 
 pub fn forward_input(ctx: &egui::Context, mpv: &Mpv) -> Input {
-    let (events, scale) = ctx.input(|input| (input.events.clone(), input.pixels_per_point));
+    let events = ctx.input(|input| input.events.clone());
     let press = |name: &str| {
         let _ = mpv.command(&["keypress", name]);
     };
+    let mut input = Input::default();
     for event in events {
         match event {
-            Event::Key { key: Key::Escape | Key::Backspace, pressed: true, .. } => return Input::Stop,
+            Event::Key { pressed: true, .. } | Event::Text(_) => input.activity = true,
+            _ => {}
+        }
+        match event {
+            Event::Key { key: Key::Escape | Key::Backspace, pressed: true, .. } => input.back = true,
+            Event::Key { key: Key::Enter, pressed: true, modifiers, .. } if modifiers.is_none() => input.ok = true,
             Event::Key { key, pressed: true, modifiers, .. } => {
                 if let Some(name) = special(key) {
                     press(&with_modifiers(modifiers, name));
@@ -92,25 +104,12 @@ pub fn forward_input(ctx: &egui::Context, mpv: &Mpv) -> Input {
             Event::Text(text) => {
                 for character in text.chars() {
                     match character {
-                        'q' | 'Q' => return Input::Stop,
+                        'q' | 'Q' => input.back = true,
                         ' ' => press("SPACE"),
                         '#' => press("SHARP"),
                         _ => press(&character.to_string()),
                     }
                 }
-            }
-            Event::PointerMoved(position) => {
-                let (x, y) = ((position.x * scale) as i64, (position.y * scale) as i64);
-                let _ = mpv.command(&["mouse", &x.to_string(), &y.to_string()]);
-            }
-            Event::PointerButton { button, pressed, .. } => {
-                let name = match button {
-                    PointerButton::Primary => "MBTN_LEFT",
-                    PointerButton::Secondary => "MBTN_RIGHT",
-                    PointerButton::Middle => "MBTN_MID",
-                    _ => continue,
-                };
-                let _ = mpv.command(&[if pressed { "keydown" } else { "keyup" }, name]);
             }
             Event::MouseWheel { delta, .. } if delta.y != 0.0 => {
                 press(if delta.y > 0.0 { "WHEEL_UP" } else { "WHEEL_DOWN" });
@@ -118,5 +117,5 @@ pub fn forward_input(ctx: &egui::Context, mpv: &Mpv) -> Input {
             _ => {}
         }
     }
-    Input::None
+    input
 }

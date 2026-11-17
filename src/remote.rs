@@ -4,7 +4,7 @@
 //! |-------------------------------------------|----------------------------------------|
 //! | `GET  /api/state`                         | état de la lecture et pistes           |
 //! | `GET  /api/artwork`                       | affiche de l'élément en cours          |
-//! | `POST /api/key    {"key": "up"}`          | touche de navigation ou de lecture     |
+//! | `POST /api/key    {"key": "up"}`          | touche de navigation ou de lecture ; `skip` valide la proposition affichée |
 //! | `POST /api/seek   {"position": 120}`      | saut absolu, ou `{"offset": -10}`      |
 //! | `POST /api/track  {"kind": "audio", "id": 2}` | piste audio ou `"subtitle"` (`id` nul : aucune) |
 //! | `POST /api/volume {"delta": 0.05}`        | volume du système                      |
@@ -38,9 +38,18 @@ pub struct State {
     pub has_previous: bool,
     pub audio: Vec<Track>,
     pub subtitles: Vec<Track>,
+    /// Proposition à l'écran (« Passer l'intro », « Épisode suivant »), validée par la touche `skip`.
+    pub prompt: Option<RemotePrompt>,
     /// Affiche de l'élément en cours et client pour aller la chercher.
     #[serde(skip)]
     pub artwork: Option<(ImageRef, Client)>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct RemotePrompt {
+    /// `skip` (passage à sauter) ou `next` (compte à rebours de l'épisode suivant).
+    pub kind: &'static str,
+    pub label: String,
 }
 
 pub enum Command {

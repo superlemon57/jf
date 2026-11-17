@@ -363,6 +363,11 @@ fn backdrop_image(item: &Item) -> Option<ImageRef> {
     reference(parent, "Backdrop", 1920, None)
 }
 
+/// Vignette 16:9 d'un épisode, pour la carte « Épisode suivant ».
+pub fn still(item: &Item) -> Option<ImageRef> {
+    thumbnail(item, Shape::Wide)
+}
+
 /// Affiche de l'élément, pour l'écran de verrouillage de la télécommande.
 pub fn artwork(item: &Item) -> Option<ImageRef> {
     thumbnail(item, Shape::Poster).map(|image| ImageRef { width: 600, ..image })

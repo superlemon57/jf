@@ -6,6 +6,7 @@ pilotée au clavier ou à la télécommande, avec mpv intégré dans la fenêtre
 - Reprise, « À suivre », bibliothèques, séries, musique, recherche
 - TV en direct : la liste des chaînes, sans guide
 - Lecture dans l'application par libmpv, avec votre configuration mpv
+- « Passer l'intro » et compte à rebours vers l'épisode suivant
 - Enchaînement des épisodes, lecture aléatoire, marquage « vu »
 - Position de lecture synchronisée avec le serveur
 - `remote/` : **jf Remote**, la télécommande pour iPhone
@@ -70,15 +71,30 @@ Quick Connect.
 | `/` | rechercher |
 | `F`, `F11` | plein écran |
 
-Lancer un épisode depuis une saison enchaîne sur les suivants ; lancer une chaîne permet
+Lancer un épisode enchaîne sur les suivants ; lancer une chaîne permet
 de zapper avec « suivant » et « précédent ».
 
 ### Lecture
 
-Pendant la lecture, le clavier et la souris sont transmis à mpv : ses raccourcis
-habituels s'appliquent (`Espace`, flèches, `j` pour les sous-titres, `#` pour l'audio…)
-et son interface apparaît au mouvement de la souris. `Échap`, `Retour arrière` et `q`
-arrêtent la lecture en conservant la position.
+jf affiche sa propre interface de lecture au mouvement de la souris ou à l'appui
+d'une touche : titre, recul et avance de 10 secondes, pause, barre de progression
+cliquable. Un clic met en pause, un double clic bascule le plein écran.
+
+| Touche | Action |
+|---|---|
+| `Entrée` | valider « Passer l'intro » ou « Épisode suivant », sinon pause |
+| `Échap`, `Retour arrière`, `q` | écarter le compte à rebours, sinon arrêter (la position est conservée) |
+| autres touches | transmises à mpv : `Espace`, flèches, `j` pour les sous-titres, `#` pour l'audio… |
+
+**Passer l'intro** apparaît pendant le générique de début (et « Passer le récap »
+pendant un récapitulatif), à partir des segments connus du serveur : Jellyfin 10.10
+ou plus récent, avec un plugin qui les détecte comme
+[Intro Skipper](https://github.com/intro-skipper/intro-skipper).
+
+**Épisode suivant** : au début du générique de fin, ou dans les dernières secondes
+s'il n'est pas connu, une carte annonce la suite et la lance après 10 secondes de
+lecture. « Voir le générique » laisse finir l'épisode. Un épisode lancé seul (depuis
+« Reprendre », « À suivre » ou une recherche) enchaîne aussi sur la suite de la série.
 
 Pour personnaliser le lecteur, déposez vos fichiers dans `~/.config/jf/mpv/` :
 `mpv.conf`, `input.conf`, `scripts/`, `script-opts/`, `shaders/`… comme pour mpv.
@@ -103,7 +119,7 @@ Le jeton Jellyfin n'est jamais exposé. Pensez à ouvrir le port 8097 du pare-fe
 |---|---|
 | `GET /api/state` | état de la lecture, pistes audio et sous-titres |
 | `GET /api/artwork` | affiche de l'élément en cours |
-| `POST /api/key {"key": "up"}` | navigation : `up`, `down`, `left`, `right`, `ok`, `back`, `home`, `menu` ; lecture : `playpause`, `play`, `pause`, `stop`, `next`, `previous` |
+| `POST /api/key {"key": "up"}` | navigation : `up`, `down`, `left`, `right`, `ok`, `back`, `home`, `menu` ; lecture : `playpause`, `play`, `pause`, `stop`, `next`, `previous`, `skip` (valide « Passer l'intro » ou « Épisode suivant ») ; `ok` fait de même, sinon pause ; `back` écarte le compte à rebours, sinon arrête |
 | `POST /api/seek {"position": 120}` | saut absolu en secondes, ou `{"offset": -10}` |
 | `POST /api/track {"kind": "subtitle", "id": 2}` | piste `audio` ou `subtitle` ; `id` nul : aucune |
 | `POST /api/volume {"delta": 0.05}` | volume du système |
@@ -118,7 +134,8 @@ xtool dev build -c release --ipa   # produit xtool/JFRemote.ipa
 ```
 
 - Croix directionnelle, retour, accueil, options
-- Pendant la lecture : pause, sauts de 10 secondes, précédent/suivant, curseur de position,
+- Pendant la lecture : « Passer l'intro » et « Épisode suivant » quand jf les propose,
+  pause, sauts de 10 secondes, précédent/suivant, curseur de position,
   choix des sous-titres et de la piste audio, arrêt (la position est conservée)
 - Les boutons de volume du téléphone règlent le volume de l'ordinateur tant que
   l'application est au premier plan
@@ -142,4 +159,4 @@ cargo run
 | `src/player.rs` | file de lecture et suivi de position |
 | `src/images.rs` | chargement et cache des images |
 | `src/remote.rs` | API télécommande |
-| `src/ui/` | écrans : navigation, lecture, connexion, menu |
+| `src/ui/` | écrans : navigation, lecture et son interface (`osd.rs`), connexion, menu |

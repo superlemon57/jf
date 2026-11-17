@@ -108,6 +108,18 @@ struct PlaybackControls: View {
                 progress
             }
             Spacer(minLength: 0)
+            if let prompt = state.prompt {
+                HStack(spacing: 10) {
+                    RemoteButton(
+                        label: prompt.label,
+                        icon: prompt.kind == "next" ? "forward.end.fill" : "forward.fill",
+                        prominent: true
+                    ) { remote.press("skip") }
+                    if prompt.kind == "next" {
+                        RemoteButton(label: "Voir le générique", icon: "text.alignleft") { remote.press("back") }
+                    }
+                }
+            }
             transport
             HStack(spacing: 10) {
                 if !state.subtitles.isEmpty {
