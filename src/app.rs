@@ -662,7 +662,7 @@ impl App {
     }
 
     fn hide_idle_cursor(&mut self, ctx: &egui::Context) {
-        if ctx.input(|input| input.pointer.is_moving() || input.pointer.any_down()) {
+        if ctx.input(|input| osd::pointer_moved(input) || input.pointer.any_down()) {
             self.pointer_moved = Instant::now();
             ctx.request_repaint_after(CURSOR_TIMEOUT);
         } else if self.pointer_moved.elapsed() >= CURSOR_TIMEOUT {

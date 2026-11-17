@@ -19,6 +19,12 @@ const GUTTER: f32 = 3.0;
 const BAR_FROM_BOTTOM: f32 = 4.2;
 const SEEK_STEP: f64 = 10.0;
 
+/// Vrai si la souris a bougé depuis l'image précédente. La vitesse calculée par egui
+/// (`is_moving`) reste nulle pour un déplacement bref : on lit les événements eux-mêmes.
+pub fn pointer_moved(input: &egui::InputState) -> bool {
+    input.events.iter().any(|event| matches!(event, egui::Event::PointerMoved(_)))
+}
+
 pub enum Action {
     TogglePause,
     SeekTo(f64),
@@ -135,7 +141,7 @@ impl Osd {
                 pointer.primary_pressed(),
                 pointer.primary_released(),
                 pointer.button_double_clicked(PointerButton::Primary),
-                pointer.is_moving(),
+                pointer_moved(input),
                 input.stable_dt.min(0.05),
             )
         });
@@ -144,10 +150,10 @@ impl Osd {
         }
 
         let visible = view.paused || self.scrub.is_some() || self.activity.elapsed() < IDLE;
+        // Fondu vers l'opacité visée, sans la dépasser ni osciller une fois atteinte.
         let target_alpha = if visible { 1.0 } else { 0.0 };
         let step = dt / 0.2;
-        self.alpha =
-            if self.alpha < target_alpha { (self.alpha + step).min(1.0) } else { (self.alpha - step).max(0.0) };
+        self.alpha += (target_alpha - self.alpha).clamp(-step, step);
         let shown = self.alpha > 0.0;
 
         // Boutons actifs : ceux de l'interface quand elle est visible, la proposition toujours.
