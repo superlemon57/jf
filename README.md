@@ -126,6 +126,7 @@ contrôle de l'iPhone (et l'app « Remote ») le trouve sous le nom `jf`.
 |---|---|
 | glisser, flèches | se déplacer ; en lecture, ±10 s (gauche/droite) et ±60 s (haut/bas) |
 | toucher, bouton central | valider ; en lecture, « Passer l'intro », « Épisode suivant » ou pause |
+| appui long (pavé ou bouton central) | menu d'options (lecture aléatoire, marquer comme vu…) ; en lecture, panneau « Sous-titres et audio » |
 | retour | page précédente ; en lecture, écarter le compte à rebours, sinon arrêter |
 | TV | accueil (arrête la lecture) |
 | lecture/pause, ±10 s | commandes de lecture |
@@ -182,6 +183,7 @@ lit quelque chose : la musique du téléphone est alors mise en pause.
 ```sh
 nix develop
 cargo run
+JF_LOG=1 cargo run   # avec le journal du protocole de la télécommande Apple TV
 ```
 
 | Fichier | Rôle |

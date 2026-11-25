@@ -389,7 +389,10 @@ impl App {
                 remote::Command::SeekTo(position) => mpv(&["seek", &position.to_string(), "absolute"]),
                 remote::Command::SeekBy(offset) => mpv(&["seek", &offset.to_string(), "relative"]),
                 remote::Command::Track(kind, id) => self.player.select_track(kind, id),
+                // Panneau « Sous-titres et audio » ouvert : la télécommande le parcourt.
+                remote::Command::Key(key) if playing && self.osd.menu_open() => self.osd.remote_key(&key),
                 remote::Command::Key(key) if playing => match key.as_str() {
+                    "menu" => self.osd.open_menu(),
                     "ok" => {
                         if !self.player.accept(&self.tasks) {
                             let _ = self.player.mpv.command(&["cycle", "pause"]);

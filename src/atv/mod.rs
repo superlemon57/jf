@@ -41,6 +41,21 @@ const PAIRING_ATTEMPTS: u8 = 3;
 const PAIRING_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 8;
 
+/// Journal du protocole sur la sortie d'erreur, activé par `JF_LOG=1`.
+fn logging() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("JF_LOG").is_some_and(|value| value != "0"))
+}
+
+macro_rules! trace {
+    ($($argument:tt)*) => {
+        if $crate::atv::logging() {
+            eprintln!("[apple-tv] {}", format!($($argument)*));
+        }
+    };
+}
+pub(crate) use trace;
+
 /// Identité stable de l'« Apple TV » jf, dérivée d'une clé privée enregistrée.
 struct Identity {
     private_key: [u8; 32],
@@ -244,6 +259,7 @@ pub fn start(
         ui,
     });
     let mdns = advertise(&shared, ip, ports).map_err(|error| format!("Bonjour : {error}"))?;
+    trace!("annoncé sur {ip}, ports {ports:?}");
 
     std::thread::spawn(move || probe_endpoint(media, false));
     std::thread::spawn(move || probe_endpoint(airplay, true));

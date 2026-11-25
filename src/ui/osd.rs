@@ -73,6 +73,8 @@ pub struct Osd {
     pressed: Option<Target>,
     /// Panneau « Sous-titres et audio » ouvert, avec l'entrée sélectionnée au clavier.
     menu: Option<Focus>,
+    /// Touches de télécommande reçues pour le panneau, traitées à la prochaine image.
+    remote_keys: Vec<&'static str>,
 }
 
 /// Position dans le panneau des pistes : colonne 0 pour l'audio, 1 pour les sous-titres.
@@ -109,7 +111,7 @@ struct Layout {
 
 impl Default for Osd {
     fn default() -> Self {
-        Self { activity: Instant::now(), alpha: 1.0, scrub: None, pressed: None, menu: None }
+        Self { activity: Instant::now(), alpha: 1.0, scrub: None, pressed: None, menu: None, remote_keys: Vec::new() }
     }
 }
 
@@ -122,6 +124,21 @@ impl Osd {
     /// Le panneau des pistes reçoit alors le clavier à la place de mpv.
     pub fn menu_open(&self) -> bool {
         self.menu.is_some()
+    }
+
+    /// Touche de télécommande pour le panneau des pistes ouvert (`up`, `ok`, `back`…).
+    pub fn remote_key(&mut self, key: &str) {
+        let key = match key {
+            "up" => "up",
+            "down" => "down",
+            "left" => "left",
+            "right" => "right",
+            "ok" => "ok",
+            "back" | "menu" => "back",
+            _ => return,
+        };
+        self.remote_keys.push(key);
+        self.poke();
     }
 
     /// Ouvre le panneau des pistes ; la sélection se placera sur les sous-titres actifs.
@@ -705,7 +722,16 @@ impl Osd {
             let typed_c = input.events.iter().any(|event| matches!(event, egui::Event::Text(text) if text == "c"));
             (keys, input.key_pressed(Key::Escape) || input.key_pressed(Key::Backspace) || typed_c)
         });
-        let [up, down, left, right, enter] = keys;
+        let remote = std::mem::take(&mut self.remote_keys);
+        let from_remote = |name| remote.contains(&name);
+        let [up, down, left, right, enter] = [
+            keys[0] || from_remote("up"),
+            keys[1] || from_remote("down"),
+            keys[2] || from_remote("left"),
+            keys[3] || from_remote("right"),
+            keys[4] || from_remote("ok"),
+        ];
+        let close = close || from_remote("back");
         if keys.iter().any(|pressed| *pressed) || close {
             self.poke();
         }

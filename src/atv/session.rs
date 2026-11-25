@@ -17,7 +17,7 @@ use super::crypto::{hkdf_expand, CompanionCipher};
 use super::opack::{self, Value};
 use super::srp::SrpServer;
 use super::tlv::{self, tags};
-use super::{Shared, DEVICE_MODEL, SOURCE_VERSION};
+use super::{trace, Shared, DEVICE_MODEL, SOURCE_VERSION};
 use crate::player::TrackKind;
 use crate::remote::{self, Command};
 
@@ -45,6 +45,8 @@ const SWIPE: f64 = 180.0;
 const TAP: f64 = 60.0;
 /// Un même appui arrive parfois deux fois : fin de toucher puis bouton « select ».
 const SELECT_ECHO: Duration = Duration::from_millis(120);
+/// Appui long (pavé ou bouton central) : menu contextuel, comme sur une Apple TV.
+const LONG_PRESS: Duration = Duration::from_millis(600);
 // Flèche maintenue : répétition après un délai.
 const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_EVERY: Duration = Duration::from_millis(130);
@@ -74,6 +76,15 @@ struct Touch {
     /// Distance maximale parcourue depuis le début du geste.
     travel: f64,
     swiped: bool,
+    started: Instant,
+    /// L'appui long a déjà ouvert le menu : la fin du geste ne valide rien.
+    long_pressed: bool,
+}
+
+/// Bouton central enfoncé, pour reconnaître l'appui long.
+struct SelectDown {
+    since: Instant,
+    long_pressed: bool,
 }
 
 struct Held {
@@ -123,12 +134,15 @@ struct Session {
     touch_size: (f64, f64),
     last_select: Option<(Instant, Source)>,
     held: Option<Held>,
+    select_down: Option<SelectDown>,
     seeking: Option<Seeking>,
     accepted: Instant,
     activity: Instant,
 }
 
 pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
+    let peer = stream.peer_addr().map(|address| address.to_string()).unwrap_or_default();
+    trace!("{peer} : connexion");
     let mut session = Session {
         buffer: Vec::new(),
         signing: SigningKey::from_bytes(&shared.identity.private_key),
@@ -147,11 +161,14 @@ pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
         touch_size: (SURFACE, SURFACE),
         last_select: None,
         held: None,
+        select_down: None,
         seeking: None,
         accepted: Instant::now(),
         activity: Instant::now(),
     };
-    let _ = session.run();
+    if let Err(error) = session.run() {
+        trace!("{peer} : fin ({error})");
+    }
 }
 
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a [u8]> {
@@ -201,7 +218,8 @@ impl Session {
         self.stream.set_nodelay(true).map_err(|error| error.to_string())?;
         loop {
             // Délai de lecture court tant qu'une touche est maintenue, pour la répétition.
-            let wait = if self.held.is_some() || self.seeking.is_some() { 40 } else { 500 };
+            let pressing = self.select_down.is_some() || self.touch.as_ref().is_some_and(|touch| !touch.swiped);
+            let wait = if self.held.is_some() || self.seeking.is_some() || pressing { 40 } else { 500 };
             let _ = self.stream.set_read_timeout(Some(Duration::from_millis(wait)));
             if let Some((header, payload)) = self.read_frame()? {
                 self.handle_frame(header, &payload)?;
@@ -301,6 +319,9 @@ impl Session {
 
     fn handle_frame(&mut self, header: [u8; 4], payload: &[u8]) -> Result<()> {
         let kind = header[0];
+        if self.cipher.is_none() {
+            trace!("trame {kind} ({} octets)", payload.len());
+        }
         if let Some(cipher) = self.cipher.as_mut() {
             if payload.is_empty() {
                 return Ok(());
@@ -334,6 +355,7 @@ impl Session {
         self.setup = None;
         self.setup_proved = false;
         let Some((pin, generation)) = self.shared.begin_pairing() else {
+            trace!("appairage refusé : attente après des codes faux");
             return self.auth_reply(PS_NEXT, &[(tags::SEQ_NO, &[2]), (tags::ERROR, &[6])]);
         };
         let srp = SrpServer::new(pin, &rand::random::<[u8; 32]>());
@@ -356,6 +378,7 @@ impl Session {
         }
         srp.process(public_key)?;
         if !srp.verify_proof(tlv_field(data, tags::PROOF)?) {
+            trace!("code faux");
             self.shared.reject_code();
             return self.auth_reply(PS_NEXT, &[(tags::SEQ_NO, &[4]), (tags::ERROR, &[2])]);
         }
@@ -440,6 +463,7 @@ impl Session {
         });
         if !verified {
             // iPhone inconnu : iOS propose alors de saisir un nouveau code.
+            trace!("vérification refusée : iPhone inconnu ou signature invalide");
             return self.auth_reply(PV_NEXT, &[(tags::SEQ_NO, &[4]), (tags::ERROR, &[2])]);
         }
         let digest = Sha256::new().chain_update(self.shared.identity.identifier.as_bytes()).chain_update(id).finalize();
@@ -450,6 +474,7 @@ impl Session {
             &hkdf_expand("", "ClientEncrypt-main", &pending.shared),
             12,
         )?);
+        trace!("iPhone vérifié, session chiffrée");
         Ok(())
     }
 
@@ -468,6 +493,7 @@ impl Session {
             .map(str::to_owned);
         let xid = message.get("_x").and_then(Value::as_int);
         let content = message.get("_c").unwrap_or(&Value::Null);
+        trace!("message {:?} ({}) : {content}", self.identifier, if is_event { "événement" } else { "requête" });
         let reply = |session: &mut Self| if is_event { Ok(()) } else { session.respond(xid, None, 0) };
 
         match self.identifier.clone().as_deref() {
@@ -600,6 +626,10 @@ impl Session {
                 self.held = Some(Held { key: button, since: Instant::now(), last: None });
                 return Ok(());
             }
+            Some(1) if button == "select" => {
+                self.select_down = Some(SelectDown { since: Instant::now(), long_pressed: false });
+                return Ok(());
+            }
             Some(1) => return Ok(()),
             Some(2) | None if direction => {
                 // Déjà envoyée à l'appui ; seul un relâchement isolé compte comme un appui.
@@ -612,7 +642,12 @@ impl Session {
             _ => return Ok(()),
         }
         match button {
-            "select" => self.select(Source::Button),
+            "select" => {
+                // Après un appui long, le relâchement ne valide pas en plus.
+                if !self.select_down.take().is_some_and(|down| down.long_pressed) {
+                    self.select(Source::Button);
+                }
+            }
             "menu" => self.shared.key("back"),
             "home" => self.shared.key("home"),
             "play_pause" => self.shared.key("playpause"),
@@ -672,7 +707,9 @@ impl Session {
         let Some(point) = point else { return };
 
         if phase == Phase::Began {
-            self.touch = Some(Touch { origin: point, last: point, travel: 0.0, swiped: false });
+            let started = Instant::now();
+            self.touch =
+                Some(Touch { origin: point, last: point, travel: 0.0, swiped: false, started, long_pressed: false });
             return;
         }
         let Some(touch) = &mut self.touch else { return };
@@ -693,8 +730,12 @@ impl Session {
         }
         if phase == Phase::Ended {
             let tap = !touch.swiped && touch.travel < TAP;
+            let long_pressed = touch.long_pressed;
             self.touch = None;
-            if tap {
+            if long_pressed {
+                // L'iPhone peut doubler la fin du geste d'un bouton « select » : ignoré.
+                self.last_select = Some((Instant::now(), Source::Touch));
+            } else if tap {
                 self.select(Source::Touch);
             }
         }
@@ -703,6 +744,23 @@ impl Session {
     /// Répète une flèche maintenue et l'avance ou le retour rapides.
     fn repeat(&mut self) {
         let now = Instant::now();
+        // Appui long : le menu s'ouvre pendant l'appui, sans attendre le relâchement.
+        let touch_long = self.touch.as_mut().filter(|touch| {
+            !touch.swiped
+                && !touch.long_pressed
+                && touch.travel < TAP
+                && now.duration_since(touch.started) >= LONG_PRESS
+        });
+        if let Some(touch) = touch_long {
+            touch.long_pressed = true;
+            self.shared.key("menu");
+        }
+        if let Some(down) = self.select_down.as_mut().filter(|down| !down.long_pressed) {
+            if now.duration_since(down.since) >= LONG_PRESS {
+                down.long_pressed = true;
+                self.shared.key("menu");
+            }
+        }
         if let Some(held) = &mut self.held {
             let due = held.last.map_or(held.since + REPEAT_DELAY, |last| last + REPEAT_EVERY);
             if now >= due {
