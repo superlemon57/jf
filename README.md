@@ -1,24 +1,20 @@
 # jf
 
-A lightweight HTPC client for [Jellyfin](https://jellyfin.org), with a Prime Video
-style interface and support for the iPhone's Apple TV remote. It plays series, movies
-and live TV, with mpv built into the window.
+[![Rust](https://img.shields.io/badge/Rust-black?logo=rust&logoColor=white)](https://www.rust-lang.org) [![NixOS](https://img.shields.io/badge/NixOS-5277C3?logo=nixos&logoColor=white)](https://nixos.org) [![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black)](#install) [![Windows](https://img.shields.io/badge/Windows-0078D4?logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4OCA4OCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTAgMGg0MnY0Mkgwek00NiAwaDQydjQySDQ2ek0wIDQ2aDQydjQySDB6TTQ2IDQ2aDQydjQySDQ2eiIvPjwvc3ZnPg==)](#install) [![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](#install) [![Jellyfin](https://img.shields.io/badge/Jellyfin-00A4DC?logo=jellyfin&logoColor=white)](https://jellyfin.org) [![Apple TV](https://img.shields.io/badge/Apple%20TV-black?logo=appletv&logoColor=white)](#apple-tv-remote) [![Claude](https://img.shields.io/badge/Claude-D97757?logo=claude&logoColor=white)](https://claude.ai)
+
+A really fast, lightweight HTPC client for [Jellyfin](https://jellyfin.org), with a Prime Video style interface and support for the iPhone's Apple TV remote.
 
 ## Features
 
 - Continue watching, Next up, libraries, search
 - Series, movies and live TV channels
-- Skip intro and a countdown to the next episode
-- Keyboard, mouse or the iOS Apple TV remote (Control Center), nothing to install on the phone
+- Skip intro/recap and a countdown to the next episode
+- Keyboard, mouse or the iOS Apple TV remote
 - Playback by libmpv, with your own mpv configuration
-- English and French
 
 ## Install
 
-Download the archive for your system from the
-[releases](https://github.com/superlemon57/jf/releases): Linux (x86_64, arm64), Windows
-(x64, arm64) or macOS (Apple Silicon, Intel). On Linux, install libmpv first
-(`libmpv2` on Debian and Ubuntu, `mpv` on Arch and Fedora).
+Download the archive for your system from the [releases](https://github.com/superlemon57/jf/releases). On Linux, install libmpv first (`libmpv2` on Debian and Ubuntu, `mpv` on Arch and Fedora).
 
 With Nix:
 
@@ -68,14 +64,21 @@ and enter the code shown by jf. The firewall must allow Bonjour (UDP 5353) and T
 
 | Key | Default | |
 |---|---|---|
-| `language` | `"en"` | `"en"` or `"fr"` |
+| `language` | `"en"` | `"en"` or `"fr"` *(more languages incoming)* |
 | `apple_tv` | `"jf"` | name shown in the iPhone remote, `""` to turn it off |
 
 ## Credits
 
 The Companion Link protocol was reverse-engineered by [pyatv](https://pyatv.dev). The
 OPACK, SRP and encryption code comes from [myRemote](https://github.com/oseanstudio/myRemote)
-(MIT, `LICENSES/myRemote-MIT.txt`). The iOS 26/27 behavior follows
-[atv-core](https://github.com/corvofeng/atv-core),
-[windows-apple-remote](https://github.com/aryakvn/windows-apple-remote) and
-[atvr4samsung](https://github.com/vb3/atvr4samsung).
+(MIT, `LICENSES/myRemote-MIT.txt`).
+The iOS 26/27 behavior follows [atv-core](https://github.com/corvofeng/atv-core), [windows-apple-remote](https://github.com/aryakvn/windows-apple-remote) and [atvr4samsung](https://github.com/vb3/atvr4samsung).
+
+## License
+
+[MIT](LICENSE).
+
+## WIP
+
+- Android phones: show up as a Google TV device for the remote built into the Google TV
+  app.
