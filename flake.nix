@@ -60,6 +60,7 @@
           '';
           meta = {
             description = "Lightweight Jellyfin HTPC client";
+            license = pkgs.lib.licenses.mit;
             mainProgram = "jf";
             platforms = systems;
           };

@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2021"
 description = "Lightweight Jellyfin HTPC client with a Prime Video style interface and Apple TV remote support"
 repository = "https://github.com/superlemon57/jf"
+license = "MIT"
 
 [dependencies]
 chacha20poly1305 = "0.10"

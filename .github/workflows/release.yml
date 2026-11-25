@@ -30,7 +30,7 @@ jobs:
         run: |
           name=jf-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}
           mkdir -p "$name"
-          cp target/release/jf assets/jf.desktop README.md "$name/"
+          cp target/release/jf assets/jf.desktop README.md LICENSE "$name/"
           cp -r LICENSES "$name/"
           tar czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v4
@@ -81,7 +81,7 @@ jobs:
         run: |
           $name = "jf-$env:GITHUB_REF_NAME-windows-${{ matrix.arch }}"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item target\release\jf.exe, mpv\libmpv-2.dll, README.md $name
+          Copy-Item target\release\jf.exe, mpv\libmpv-2.dll, README.md, LICENSE $name
           Copy-Item -Recurse LICENSES $name
           Compress-Archive $name "$name.zip"
       - uses: actions/upload-artifact@v4
@@ -109,7 +109,9 @@ jobs:
         run: |
           version=${GITHUB_REF_NAME#v}
           app=jf.app/Contents
-          mkdir -p "$app/MacOS" "$app/libs"
+          mkdir -p "$app/MacOS" "$app/libs" "$app/Resources"
+          cp LICENSE "$app/Resources/"
+          cp -r LICENSES "$app/Resources/"
           cp target/release/jf "$app/MacOS/"
           cat > "$app/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
