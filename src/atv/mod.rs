@@ -14,8 +14,8 @@ mod tlv;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, UdpSocket};
+use std::io::{self, Write};
+use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -33,8 +33,8 @@ use crate::remote;
 const DEVICE_MODEL: &str = "AppleTV14,1";
 const SOURCE_VERSION: &str = "715.2";
 const COMPANION_FLAGS: &str = "0x36782";
-/// Ports habituels d'une Apple TV ; un autre est pris s'ils sont occupés.
-const PORTS: [u16; 3] = [49152, 49153, 49154];
+/// Port Companion Link habituel d'une Apple TV ; un autre est pris s'il est occupé.
+const PORT: u16 = 49153;
 const PAIRING_WINDOW: Duration = Duration::from_secs(120);
 /// Essais de code autorisés par fenêtre d'appairage.
 const PAIRING_ATTEMPTS: u8 = 3;
@@ -266,12 +266,8 @@ pub fn start(
 ) -> Result<Handle, String> {
     let ip = local_ip().ok_or("aucune adresse sur le réseau local")?;
     let identity = load_identity(&directory).map_err(|error| error.to_string())?;
-    let listeners = PORTS.map(bind);
-    let [media, companion, airplay] = listeners;
-    let (media, companion, airplay) =
-        (media.map_err(|e| e.to_string())?, companion.map_err(|e| e.to_string())?, airplay.map_err(|e| e.to_string())?);
-    let port = |listener: &TcpListener| listener.local_addr().map(|address| address.port()).unwrap_or(0);
-    let ports = [port(&media), port(&companion), port(&airplay)];
+    let companion = bind(PORT).map_err(|error| error.to_string())?;
+    let port = companion.local_addr().map(|address| address.port()).map_err(|error| error.to_string())?;
 
     let shared = Arc::new(Shared {
         name: name.to_owned(),
@@ -285,11 +281,8 @@ pub fn start(
         commands,
         ui,
     });
-    let (mdns, services) = advertise(&shared, ip, ports).map_err(|error| format!("Bonjour : {error}"))?;
-    trace!("annoncé sur {ip}, ports {ports:?}");
-
-    std::thread::spawn(move || probe_endpoint(media, false));
-    std::thread::spawn(move || probe_endpoint(airplay, true));
+    let (mdns, services) = advertise(&shared, ip, port).map_err(|error| format!("Bonjour : {error}"))?;
+    trace!("annoncé sur {ip}, port {port}");
     let connections = Arc::new(AtomicUsize::new(0));
     let session_shared = shared.clone();
     std::thread::spawn(move || {
@@ -308,15 +301,11 @@ pub fn start(
     Ok(Handle { shared, mdns, services })
 }
 
-/// Service Bonjour : type, port et enregistrement TXT.
-type Record<'a> = (&'a str, u16, Vec<(&'a str, &'a str)>);
-
-/// Annonce les trois services qu'iOS attend d'une Apple TV.
-fn advertise(
-    shared: &Shared,
-    ip: Ipv4Addr,
-    [media, companion, airplay]: [u16; 3],
-) -> Result<(ServiceDaemon, Vec<String>), mdns_sd::Error> {
+/// Annonce le service Companion Link d'une Apple TV, seulement sur l'interface du réseau
+/// local. Comme linux-apple-remote (maintenu pour iOS 26/27), on n'annonce ni MediaRemote
+/// ni AirPlay : un iPhone qui tente ces services factices attend une réponse qui ne vient
+/// jamais, et la télécommande reste sur « Connexion ».
+fn advertise(shared: &Shared, ip: Ipv4Addr, port: u16) -> Result<(ServiceDaemon, Vec<String>), mdns_sd::Error> {
     let identity = &shared.identity;
     let mac = identity.mac.map(|byte| format!("{byte:02X}")).join(":");
     let mac_id = mac.replace(':', "");
@@ -324,88 +313,25 @@ fn advertise(
         let hash = Sha256::new().chain_update(label).chain_update(identity.identifier.as_bytes()).finalize();
         hex_upper(&hash[..bytes])
     };
-    let (airplay_id, rp_hn, rp_ad, rp_hi) =
-        (alias("airplay-identity:", 8), alias("rpHN:", 6), alias("rpAD:", 6), alias("rpHI:", 6));
-    let airplay_key = alias("pk:", 16).to_ascii_lowercase();
-    let unique = identity.identifier.replace('-', "");
-    let name = shared.name.as_str();
-
-    let records: [Record; 3] = [
-        (
-            "_mediaremotetv._tcp.local.",
-            media,
-            vec![
-                ("Name", name),
-                ("UniqueIdentifier", &unique),
-                ("SystemBuildVersion", "22K160"),
-                ("LocalAirPlayReceiverPairingIdentity", &airplay_id),
-                ("ModelName", "Apple TV"),
-                ("AllowPairing", "YES"),
-            ],
-        ),
-        (
-            "_companion-link._tcp.local.",
-            companion,
-            vec![
-                ("rpMac", "1"),
-                ("rpHA", &mac_id),
-                ("rpHN", &rp_hn),
-                ("rpVr", SOURCE_VERSION),
-                ("rpMd", DEVICE_MODEL),
-                ("rpFl", COMPANION_FLAGS),
-                ("rpAD", &rp_ad),
-                ("rpHI", &rp_hi),
-                ("rpBA", &mac),
-            ],
-        ),
-        (
-            "_airplay._tcp.local.",
-            airplay,
-            vec![
-                ("deviceid", &mac),
-                ("features", "0x5A7FFFF7,0x1E"),
-                ("flags", "0x44"),
-                ("model", DEVICE_MODEL),
-                ("srcvers", SOURCE_VERSION),
-                ("vv", "2"),
-                ("pi", &identity.identifier),
-                ("pk", &airplay_key),
-                ("name", name),
-            ],
-        ),
+    let (rp_hn, rp_ad, rp_hi) = (alias("rpHN:", 6), alias("rpAD:", 6), alias("rpHI:", 6));
+    let txt = [
+        ("rpMac", "2"),
+        ("rpHA", mac_id.as_str()),
+        ("rpHN", &rp_hn),
+        ("rpVr", SOURCE_VERSION),
+        ("rpMd", DEVICE_MODEL),
+        ("rpFl", COMPANION_FLAGS),
+        ("rpAD", &rp_ad),
+        ("rpHI", &rp_hi),
+        ("rpBA", &mac),
+        ("rpMRtID", &identity.identifier),
     ];
     let daemon = ServiceDaemon::new()?;
+    daemon.disable_interface(IfKind::All)?;
+    daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip)))?;
     let host = format!("jf-{}.local.", mac_id.to_lowercase());
-    let mut services = Vec::new();
-    for (kind, port, txt) in records {
-        let info = ServiceInfo::new(kind, name, &host, IpAddr::V4(ip), port, &txt[..])?;
-        services.push(info.get_fullname().to_owned());
-        daemon.register(info)?;
-    }
+    let info = ServiceInfo::new("_companion-link._tcp.local.", &shared.name, &host, IpAddr::V4(ip), port, &txt[..])?;
+    let services = vec![info.get_fullname().to_owned()];
+    daemon.register(info)?;
     Ok((daemon, services))
-}
-
-/// iOS sonde aussi les services MediaRemote et AirPlay : une réponse minimale suffit,
-/// les commandes passent toutes par Companion Link.
-fn probe_endpoint(listener: TcpListener, airplay: bool) {
-    for stream in listener.incoming().flatten() {
-        std::thread::spawn(move || answer_probe(stream, airplay));
-    }
-}
-
-fn answer_probe(mut stream: TcpStream, airplay: bool) {
-    let peer = stream.peer_addr().map(|address| address.to_string()).unwrap_or_default();
-    trace!("{peer} : sonde {}", if airplay { "AirPlay" } else { "MediaRemote" });
-    let mut buffer = [0u8; 1024];
-    let wait = if airplay { 3 } else { 60 };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(wait)));
-    if airplay {
-        if matches!(stream.read(&mut buffer), Ok(1..)) {
-            let _ = stream.write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
-            );
-        }
-        return;
-    }
-    while matches!(stream.read(&mut buffer), Ok(1..)) {}
 }

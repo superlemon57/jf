@@ -150,7 +150,7 @@ iPhone et donne à jf une nouvelle identité : l'iPhone le voit comme un nouvel 
 ce qui règle aussi les connexions qui restent bloquées.
 
 En cas de problème, `JF_LOG=1 jf 2> jf-apple-tv.log` enregistre tout l'échange.
-Le pare-feu doit laisser passer Bonjour (UDP 5353) et les ports TCP 49152 à 49154.
+Le pare-feu doit laisser passer Bonjour (UDP 5353) et le port TCP 49153.
 
 Le protocole (Companion Link) a été reconstitué par [pyatv](https://pyatv.dev) ; le codec
 OPACK, l'appairage SRP et le chiffrement viennent de
