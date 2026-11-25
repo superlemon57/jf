@@ -3,7 +3,6 @@
 use std::sync::mpsc::{channel, Sender};
 use std::time::Instant;
 
-use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::app::{Message, Tasks};
@@ -82,7 +81,7 @@ struct Current {
     last_report: Instant,
 }
 
-#[derive(Clone, Serialize, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Track {
     pub id: i64,
     pub label: String,
@@ -323,10 +322,6 @@ impl Player {
 
     pub fn has_next(&self) -> bool {
         self.index + 1 < self.queue.len()
-    }
-
-    pub fn has_previous(&self) -> bool {
-        self.index > 0 && !self.queue.is_empty()
     }
 
     /// Passe à l'élément suivant (+1) ou précédent (-1) de la file.

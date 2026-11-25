@@ -10,7 +10,6 @@ pilotée au clavier ou à la télécommande, avec mpv intégré dans la fenêtre
 - Enchaînement des épisodes, lecture aléatoire, marquage « vu »
 - Position de lecture synchronisée avec le serveur
 - Pilotable par la télécommande Apple TV d'iOS (Centre de contrôle), sans rien installer
-- `remote/` : **jf Remote**, une télécommande plus complète pour iPhone
 
 Écrit en Rust avec [egui](https://github.com/emilk/egui). Linux, Wayland ou X11.
 Serveur Jellyfin 10.9 ou plus récent.
@@ -105,11 +104,10 @@ Pour personnaliser le lecteur, déposez vos fichiers dans `~/.config/jf/mpv/` :
 
 ## Configuration
 
-`~/.config/jf/config.json` contient la session et deux réglages :
+`~/.config/jf/config.json` contient la session et un réglage :
 
 | Clé | Rôle |
 |---|---|
-| `remote` | adresse d'écoute de l'API télécommande (`0.0.0.0:8097` par défaut, `""` pour la désactiver) |
 | `apple_tv` | nom affiché dans la télécommande Apple TV d'iOS (`jf` par défaut, `""` pour la désactiver) |
 
 Les images sont mises en cache dans `~/.cache/jf/`.
@@ -143,41 +141,6 @@ OPACK, l'appairage SRP et le chiffrement viennent de
 [myRemote](https://github.com/oseanstudio/myRemote), sous licence MIT
 (`LICENSES/myRemote-MIT.txt`).
 
-## Télécommande
-
-jf expose une petite API HTTP sur le réseau local, utilisée par jf Remote.
-**Elle n'est pas authentifiée** : toute machine du réseau peut piloter la lecture.
-Le jeton Jellyfin n'est jamais exposé. Pensez à ouvrir le port 8097 du pare-feu.
-
-| Requête | Effet |
-|---|---|
-| `GET /api/state` | état de la lecture, pistes audio et sous-titres |
-| `GET /api/artwork` | affiche de l'élément en cours |
-| `POST /api/key {"key": "up"}` | navigation : `up`, `down`, `left`, `right`, `ok`, `back`, `home`, `menu` ; lecture : `playpause`, `play`, `pause`, `stop`, `next`, `previous`, `skip` (valide « Passer l'intro » ou « Épisode suivant ») ; `ok` fait de même, sinon pause ; `back` écarte le compte à rebours, sinon arrête |
-| `POST /api/seek {"position": 120}` | saut absolu en secondes, ou `{"offset": -10}` |
-| `POST /api/track {"kind": "subtitle", "id": 2}` | piste `audio` ou `subtitle` ; `id` nul : aucune |
-| `POST /api/volume {"delta": 0.05}` | volume du système |
-
-### jf Remote (iOS)
-
-Application SwiftUI dans `remote/`, construite avec [xtool](https://github.com/xtool-org/xtool) :
-
-```sh
-cd remote
-xtool dev build -c release --ipa   # produit xtool/JFRemote.ipa
-```
-
-- Croix directionnelle, retour, accueil, options
-- Pendant la lecture : « Passer l'intro » et « Épisode suivant » quand jf les propose,
-  pause, sauts de 10 secondes, précédent/suivant, curseur de position,
-  choix des sous-titres et de la piste audio, arrêt (la position est conservée)
-- Les boutons de volume du téléphone règlent le volume de l'ordinateur tant que
-  l'application est au premier plan
-- Lecture en cours et commandes sur l'écran de verrouillage
-
-Pour apparaître sur l'écran de verrouillage, l'application joue un silence pendant que jf
-lit quelque chose : la musique du téléphone est alors mise en pause.
-
 ## Développement
 
 ```sh
@@ -193,6 +156,6 @@ JF_LOG=1 cargo run   # avec le journal du protocole de la télécommande Apple T
 | `src/mpv.rs` | liaison libmpv et rendu OpenGL |
 | `src/player.rs` | file de lecture et suivi de position |
 | `src/images.rs` | chargement et cache des images |
-| `src/remote.rs` | API télécommande |
+| `src/remote.rs` | état et commandes partagés avec la télécommande, volume du système |
 | `src/atv/` | jf vu comme une Apple TV par la télécommande d'iOS |
 | `src/ui/` | écrans : navigation, lecture et son interface (`osd.rs`), connexion, menu |

@@ -11,7 +11,7 @@ use crate::config::{self, Config};
 use crate::images::Images;
 use crate::jellyfin::{Client, Item};
 use crate::mpv::{self, Mpv};
-use crate::player::{Outcome, Player, Prompt, Stream, TrackKind};
+use crate::player::{Outcome, Player, Stream, TrackKind};
 use crate::remote;
 use crate::ui::browse::{self, Backdrop, Direction, Page, Section, Source};
 use crate::ui::login::{self, Login};
@@ -139,21 +139,11 @@ impl App {
         };
         if !app.config.apple_tv.is_empty() {
             let directory = config::config_dir().join("apple-tv");
-            let started = crate::atv::start(
-                &app.config.apple_tv,
-                directory,
-                remote_state.clone(),
-                remote_sender.clone(),
-                ctx.clone(),
-            );
+            let started =
+                crate::atv::start(&app.config.apple_tv, directory, remote_state.clone(), remote_sender, ctx.clone());
             match started {
                 Ok(handle) => app.apple_tv = Some(handle),
                 Err(error) => app.show_toast(format!("Télécommande Apple TV indisponible : {error}")),
-            }
-        }
-        if !app.config.remote.is_empty() {
-            if let Err(error) = remote::start(&app.config.remote, remote_state, remote_sender, ctx.clone()) {
-                app.show_toast(format!("Télécommande indisponible sur {} : {error}", app.config.remote));
             }
         }
         if app.config.logged_in() {
@@ -386,7 +376,6 @@ impl App {
                 let _ = self.player.mpv.command(args);
             };
             match command {
-                remote::Command::SeekTo(position) => mpv(&["seek", &position.to_string(), "absolute"]),
                 remote::Command::SeekBy(offset) => mpv(&["seek", &offset.to_string(), "relative"]),
                 remote::Command::Track(kind, id) => self.player.select_track(kind, id),
                 // Panneau « Sous-titres et audio » ouvert : la télécommande le parcourt.
@@ -397,9 +386,6 @@ impl App {
                         if !self.player.accept(&self.tasks) {
                             let _ = self.player.mpv.command(&["cycle", "pause"]);
                         }
-                    }
-                    "skip" => {
-                        self.player.accept(&self.tasks);
                     }
                     "playpause" => mpv(&["cycle", "pause"]),
                     "play" => self.player.mpv.set("pause", "no"),
@@ -454,26 +440,15 @@ impl App {
         }
         self.state_published = Instant::now();
         let mut state = remote::State::default();
-        if let (Some(item), Some(client)) = (self.player.item(), &self.client) {
-            let (position, duration, paused, live) = self.player.progress().unwrap_or_default();
+        if let Some(item) = self.player.item() {
+            let (_, duration, paused, live) = self.player.progress().unwrap_or_default();
             state = remote::State {
                 playing: true,
                 paused,
                 live,
                 title: item.play_title(),
-                position,
                 duration,
-                has_next: self.player.has_next(),
-                has_previous: self.player.has_previous(),
-                audio: self.player.tracks(TrackKind::Audio),
                 subtitles: self.player.tracks(TrackKind::Subtitle),
-                prompt: self.player.prompt().map(|prompt| match prompt {
-                    Prompt::Skip { label, .. } => remote::RemotePrompt { kind: "skip", label: label.to_owned() },
-                    Prompt::NextUp { .. } => {
-                        remote::RemotePrompt { kind: "next", label: "Épisode suivant".to_owned() }
-                    }
-                }),
-                artwork: browse::artwork(item).map(|image| (image, client.clone())),
             };
         }
         *self.remote_state.lock().unwrap() = state;

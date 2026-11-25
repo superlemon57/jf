@@ -381,11 +381,6 @@ pub fn still(item: &Item) -> Option<ImageRef> {
     thumbnail(item, Shape::Wide)
 }
 
-/// Affiche de l'élément, pour l'écran de verrouillage de la télécommande.
-pub fn artwork(item: &Item) -> Option<ImageRef> {
-    thumbnail(item, Shape::Poster).map(|image| ImageRef { width: 600, ..image })
-}
-
 // ------------------------------------------------------------------ image de fond
 
 /// Fond de l'élément sélectionné, avec fondu enchaîné entre deux images.

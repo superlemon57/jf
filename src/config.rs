@@ -13,8 +13,6 @@ pub struct Config {
     pub token: String,
     pub user_id: String,
     pub device_id: String,
-    /// Adresse d'écoute de l'API télécommande ; vide pour la désactiver.
-    pub remote: String,
     /// Nom sous lequel jf apparaît comme Apple TV dans la télécommande d'iOS ; vide pour désactiver.
     pub apple_tv: String,
 }
@@ -26,7 +24,6 @@ impl Default for Config {
             token: String::new(),
             user_id: String::new(),
             device_id: String::new(),
-            remote: "0.0.0.0:8097".into(),
             apple_tv: "jf".into(),
         }
     }

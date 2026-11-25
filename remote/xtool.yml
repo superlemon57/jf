@@ -1,5 +1,0 @@
-version: 1
-bundleID: lol.superlemon.jfremote
-infoPath: Info.plist
-iconPath: Resources/AppIcon.png
-skipLSP: true
