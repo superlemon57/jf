@@ -1,4 +1,4 @@
-//! Chargement des images en arrière-plan : cache disque, décodage et textures.
+//! Background image loading: disk cache, decoding and textures.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use eframe::egui;
 use crate::jellyfin::Client;
 
 const WORKERS: usize = 6;
-/// Au-delà, les demandes les plus anciennes (cartes déjà hors de l'écran) sont abandonnées.
+/// Beyond this, the oldest requests (cards already off screen) are dropped.
 const MAX_PENDING: usize = 96;
 const MAX_TEXTURES: usize = 400;
 
@@ -20,7 +20,7 @@ pub struct ImageRef {
     pub id: String,
     pub kind: &'static str,
     pub width: u32,
-    /// Change quand l'image change côté serveur, ce qui invalide le cache.
+    /// Changes when the image changes on the server, which invalidates the cache.
     pub tag: String,
 }
 
@@ -33,7 +33,7 @@ impl ImageRef {
 
 pub struct Loaded<'a> {
     pub texture: &'a egui::TextureHandle,
-    /// Secondes écoulées depuis l'arrivée de l'image, pour le fondu d'apparition.
+    /// Seconds since the image arrived, for the fade-in.
     pub age: f32,
 }
 
@@ -76,7 +76,7 @@ impl Images {
         self.client = client;
     }
 
-    /// À appeler une fois par image affichée à l'écran.
+    /// Call once per frame shown on screen.
     pub fn begin_frame(&mut self) {
         self.frame += 1;
         for (key, texture) in self.results.try_iter() {
@@ -93,7 +93,7 @@ impl Images {
         }
     }
 
-    /// Renvoie l'image si elle est prête ; sinon lance son chargement.
+    /// Returns the image if it is ready; otherwise starts loading it.
     pub fn get(&mut self, image: &ImageRef) -> Option<Loaded<'_>> {
         let key = image.key();
         if !self.slots.contains_key(&key) {
@@ -129,7 +129,7 @@ fn worker(
             let (jobs, wake) = &*queue;
             let mut jobs = jobs.lock().unwrap();
             loop {
-                // La demande la plus récente d'abord : c'est celle qui est à l'écran.
+                // Most recent request first: it is the one on screen.
                 match jobs.pop() {
                     Some(job) => break job,
                     None => jobs = wake.wait(jobs).unwrap(),

@@ -1,8 +1,9 @@
-//! Écran de connexion au serveur Jellyfin.
+//! Sign-in screen for the Jellyfin server.
 
 use eframe::egui::{self, FontId, Key, RichText};
 
 use super::theme;
+use crate::i18n::t;
 
 #[derive(Default)]
 pub struct Login {
@@ -11,9 +12,9 @@ pub struct Login {
     password: String,
     pub busy: bool,
     pub error: Option<String>,
-    /// Code Quick Connect à saisir sur un autre appareil.
+    /// Quick Connect code to enter on another device.
     pub code: Option<String>,
-    /// Le premier champ a reçu le focus à l'ouverture de l'écran.
+    /// The first field got the focus when the screen opened.
     focused: bool,
 }
 
@@ -40,7 +41,7 @@ impl Login {
         let column = egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(width, 26.0 * rem));
         ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| {
             ui.label(RichText::new("jf").font(FontId::new(2.4 * rem, theme::semibold())).color(theme::TEXT));
-            ui.label(RichText::new("Connexion à Jellyfin").color(theme::DIM));
+            ui.label(RichText::new(t("Sign in to Jellyfin", "Connexion à Jellyfin")).color(theme::DIM));
             ui.add_space(rem);
 
             let field = |text: &mut String, hint: &str, password: bool, ui: &mut egui::Ui| {
@@ -51,19 +52,20 @@ impl Login {
                     .desired_width(width);
                 ui.add_enabled(!self.busy, edit)
             };
-            let server = field(&mut self.server, "Adresse du serveur", false, ui);
+            let server = field(&mut self.server, t("Server address", "Adresse du serveur"), false, ui);
             if !self.focused {
                 server.request_focus();
                 self.focused = true;
             }
-            field(&mut self.user, "Utilisateur", false, ui);
-            let password = field(&mut self.password, "Mot de passe", true, ui);
+            field(&mut self.user, t("User", "Utilisateur"), false, ui);
+            let password = field(&mut self.password, t("Password", "Mot de passe"), true, ui);
             let submitted = password.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
 
             ui.add_space(0.4 * rem);
             ui.horizontal(|ui| {
                 let ready = !self.busy && !self.server.trim().is_empty();
-                let connect = ui.add_enabled(ready && !self.user.is_empty(), egui::Button::new("Se connecter"));
+                let connect =
+                    ui.add_enabled(ready && !self.user.is_empty(), egui::Button::new(t("Sign in", "Se connecter")));
                 if connect.clicked() || (submitted && ready && !self.user.is_empty()) {
                     request = Some(Request::Password {
                         server: self.server.clone(),
@@ -80,13 +82,16 @@ impl Login {
             if let Some(code) = &self.code {
                 ui.label(RichText::new(code).font(FontId::new(2.4 * rem, theme::semibold())).color(theme::TEXT));
                 ui.label(
-                    RichText::new("Saisis ce code dans un client déjà connecté (menu utilisateur → Quick Connect).")
-                        .color(theme::DIM),
+                    RichText::new(t(
+                        "Enter this code in a signed-in client (user menu → Quick Connect).",
+                        "Saisis ce code dans un client déjà connecté (menu utilisateur → Quick Connect).",
+                    ))
+                    .color(theme::DIM),
                 );
             } else if let Some(error) = &self.error {
                 ui.label(RichText::new(error).color(theme::TEXT));
             } else if self.busy {
-                ui.label(RichText::new("Connexion…").color(theme::DIM));
+                ui.label(RichText::new(t("Signing in…", "Connexion…")).color(theme::DIM));
             }
         });
         request

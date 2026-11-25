@@ -1,7 +1,5 @@
-//! Fichier de configuration et dossiers de l'application.
+//! Configuration file and application folders.
 
-use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -13,8 +11,10 @@ pub struct Config {
     pub token: String,
     pub user_id: String,
     pub device_id: String,
-    /// Nom sous lequel jf apparaît comme Apple TV dans la télécommande d'iOS ; vide pour désactiver.
+    /// Name shown for jf in the iOS Apple TV remote; empty to disable it.
     pub apple_tv: String,
+    /// Interface language: "en" (default) or "fr".
+    pub language: String,
 }
 
 impl Default for Config {
@@ -25,32 +25,53 @@ impl Default for Config {
             user_id: String::new(),
             device_id: String::new(),
             apple_tv: "jf".into(),
+            language: "en".into(),
         }
     }
 }
 
-fn xdg(variable: &str, fallback: &str) -> PathBuf {
-    let base = std::env::var_os(variable)
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(fallback));
-    base.join("jf")
+fn home() -> PathBuf {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default()
 }
 
+/// `$VARIABLE/jf` when the variable holds an absolute path, else `fallback/jf`.
+fn folder(variable: &str, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
+    std::env::var_os(variable).map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(fallback).join("jf")
+}
+
+/// `~/.config/jf` (XDG), `~/Library/Application Support/jf` or `%APPDATA%\jf`.
 pub fn config_dir() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config")
-}
-
-pub fn cache_dir() -> PathBuf {
-    xdg("XDG_CACHE_HOME", ".cache")
-}
-
-fn random_id() -> String {
-    let mut bytes = [0u8; 16];
-    if let Ok(mut file) = std::fs::File::open("/dev/urandom") {
-        let _ = file.read_exact(&mut bytes);
+    if cfg!(target_os = "windows") {
+        folder("APPDATA", || home().join("AppData").join("Roaming"))
+    } else if cfg!(target_os = "macos") {
+        folder("XDG_CONFIG_HOME", || home().join("Library").join("Application Support"))
+    } else {
+        folder("XDG_CONFIG_HOME", || home().join(".config"))
     }
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// `~/.cache/jf` (XDG), `~/Library/Caches/jf` or `%LOCALAPPDATA%\jf`.
+pub fn cache_dir() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        folder("LOCALAPPDATA", || home().join("AppData").join("Local")).join("cache")
+    } else if cfg!(target_os = "macos") {
+        folder("XDG_CACHE_HOME", || home().join("Library").join("Caches"))
+    } else {
+        folder("XDG_CACHE_HOME", || home().join(".cache"))
+    }
+}
+
+/// Writes a file readable by the current user only (it may hold a token or a key).
+pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(bytes)
 }
 
 impl Config {
@@ -60,7 +81,7 @@ impl Config {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         if config.device_id.is_empty() {
-            config.device_id = random_id();
+            config.device_id = rand::random::<[u8; 16]>().iter().map(|byte| format!("{byte:02x}")).collect();
         }
         config
     }
@@ -69,16 +90,9 @@ impl Config {
         !self.server.is_empty() && !self.token.is_empty() && !self.user_id.is_empty()
     }
 
-    /// Le fichier contient le jeton d'accès : lisible par l'utilisateur seulement.
+    /// The file holds the access token: readable by the user only.
     pub fn save(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(config_dir())?;
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(config_dir().join("config.json"))?;
-        serde_json::to_writer_pretty(file, self)?;
-        Ok(())
+        let json = serde_json::to_vec_pretty(self)?;
+        write_private(&config_dir().join("config.json"), &json)
     }
 }

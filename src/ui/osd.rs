@@ -1,5 +1,5 @@
-//! Interface de lecture dessinée par-dessus la vidéo : titre, commandes centrales,
-//! barre de progression, bouton « Passer l'intro » et compte à rebours de l'épisode suivant.
+//! Playback interface drawn over the video: title, center controls, progress bar,
+//! "Skip intro" button and the next-episode countdown.
 
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
@@ -8,21 +8,22 @@ use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Shape, Stroke,
 
 use super::browse::{self, clock};
 use super::theme::{self, Text};
+use crate::i18n::t;
 use crate::images::Images;
 use crate::jellyfin::Item;
 use crate::player::{Prompt, Track, TrackKind, COUNTDOWN};
 
-/// Délai sans activité avant que l'interface ne s'efface.
+/// Idle time before the interface fades out.
 const IDLE: Duration = Duration::from_secs(3);
-/// Délai plus long quand on navigue à la télécommande, le temps de viser le bouton suivant.
+/// Longer delay when navigating with the remote, to aim at the next button.
 const REMOTE_IDLE: Duration = Duration::from_secs(6);
-// Longueurs en rem (voir `theme::rem`).
+// Lengths in rem (see `theme::rem`).
 const GUTTER: f32 = 3.0;
 const BAR_FROM_BOTTOM: f32 = 4.2;
 const SEEK_STEP: f64 = 10.0;
 
-/// Vrai si la souris a bougé depuis l'image précédente. La vitesse calculée par egui
-/// (`is_moving`) reste nulle pour un déplacement bref : on lit les événements eux-mêmes.
+/// True if the mouse moved since the previous frame. egui's computed velocity
+/// (`is_moving`) stays zero for a brief move, so the events themselves are read.
 pub fn pointer_moved(input: &egui::InputState) -> bool {
     input.events.iter().any(|event| matches!(event, egui::Event::PointerMoved(_)))
 }
@@ -37,17 +38,17 @@ pub enum Action {
     SelectTrack(TrackKind, Option<i64>),
 }
 
-/// Ce que montre l'interface, lu dans le lecteur à chaque image.
+/// What the interface shows, read from the player every frame.
 pub struct View<'a> {
     pub item: &'a Item,
     pub position: f64,
     pub duration: f64,
     pub paused: bool,
     pub live: bool,
-    /// Fin de la partie déjà téléchargée, en secondes.
+    /// End of the already downloaded part, in seconds.
     pub cache: Option<f64>,
     pub prompt: Option<Prompt<'a>>,
-    /// Pistes, lues seulement quand le panneau « Sous-titres et audio » est ouvert.
+    /// Tracks, read only while the "Subtitles and audio" panel is open.
     pub audio: Vec<Track>,
     pub subtitles: Vec<Track>,
 }
@@ -61,7 +62,7 @@ enum Target {
     Accept,
     Dismiss,
     Tracks,
-    /// Entrée du panneau des pistes : (colonne, ligne).
+    /// Entry of the tracks panel: (column, row).
     TrackOption(usize, usize),
     Video,
 }
@@ -69,19 +70,19 @@ enum Target {
 pub struct Osd {
     activity: Instant,
     alpha: f32,
-    /// Position choisie en glissant sur la barre, tant que le bouton est enfoncé.
+    /// Position picked by dragging on the bar, while the button is held.
     scrub: Option<f64>,
-    /// Élément sous le pointeur au moment de l'appui.
+    /// Element under the pointer when the button went down.
     pressed: Option<Target>,
-    /// Panneau « Sous-titres et audio » ouvert, avec l'entrée sélectionnée au clavier.
+    /// "Subtitles and audio" panel open, with the entry selected by keyboard.
     menu: Option<Focus>,
-    /// Touches de télécommande reçues pour le panneau, traitées à la prochaine image.
+    /// Remote keys received for the panel, handled on the next frame.
     remote_keys: Vec<&'static str>,
-    /// Élément sélectionné à la télécommande (flèches), absent tant qu'elle n'a pas servi.
+    /// Element selected with the remote (arrows), absent until the remote is used.
     focus: Option<Target>,
-    /// Ce que montrait la dernière image, pour interpréter les touches de télécommande.
+    /// What the last frame showed, to interpret remote keys.
     seen: Seen,
-    /// Dernier mouvement de la souris : un pointeur immobile ne surligne rien.
+    /// Last mouse movement: a still pointer highlights nothing.
     pointer_moved: Instant,
 }
 
@@ -90,11 +91,11 @@ struct Seen {
     shown: bool,
     paused: bool,
     live: bool,
-    /// Proposition à l'écran : `Some(true)` pour « Épisode suivant », `Some(false)` pour un passage à sauter.
+    /// Prompt on screen: `Some(true)` for "Next episode", `Some(false)` for a segment to skip.
     prompt: Option<bool>,
 }
 
-/// Position dans le panneau des pistes : colonne 0 pour l'audio, 1 pour les sous-titres.
+/// Position in the tracks panel: column 0 for audio, 1 for subtitles.
 #[derive(Clone, Copy, PartialEq)]
 struct Focus {
     column: usize,
@@ -104,7 +105,7 @@ struct Focus {
 pub struct Painted {
     pub actions: Vec<Action>,
     pub animating: bool,
-    /// La barre de progression est affichée : les sous-titres doivent passer au-dessus.
+    /// The progress bar is shown: subtitles must move above it.
     pub controls_shown: bool,
 }
 
@@ -112,7 +113,7 @@ fn white(alpha: f32) -> Color32 {
     Color32::from_white_alpha((alpha.clamp(0.0, 1.0) * 255.0) as u8)
 }
 
-/// Rectangle d'un bouton, et l'élément qu'il déclenche.
+/// Rectangle of a button, and the element it triggers.
 struct Hit {
     rect: Rect,
     target: Target,
@@ -121,7 +122,7 @@ struct Hit {
 struct Layout {
     rem: f32,
     bar: Rect,
-    /// Zone sensible de la barre, plus haute que la barre elle-même.
+    /// Hit area of the bar, taller than the bar itself.
     bar_zone: Rect,
     controls: Vec<Hit>,
 }
@@ -143,17 +144,17 @@ impl Default for Osd {
 }
 
 impl Osd {
-    /// Montre l'interface (touche pressée, souris déplacée, saut…).
+    /// Shows the interface (key pressed, mouse moved, seek…).
     pub fn poke(&mut self) {
         self.activity = Instant::now();
     }
 
-    /// Le panneau des pistes reçoit alors le clavier à la place de mpv.
+    /// The tracks panel then takes the keyboard instead of mpv.
     pub fn menu_open(&self) -> bool {
         self.menu.is_some()
     }
 
-    /// Touche de télécommande pour le panneau des pistes ouvert (`up`, `ok`, `back`…).
+    /// Remote key for the open tracks panel (`up`, `ok`, `back`…).
     pub fn remote_key(&mut self, key: &str) {
         let key = match key {
             "up" => "up",
@@ -168,7 +169,7 @@ impl Osd {
         self.poke();
     }
 
-    /// Lignes de l'interface parcourues aux flèches, de haut en bas.
+    /// Interface rows navigated with the arrows, top to bottom.
     fn rows(&self) -> Vec<Vec<Target>> {
         let seen = self.seen;
         let mut rows = vec![vec![Target::Tracks]];
@@ -188,14 +189,14 @@ impl Osd {
         rows
     }
 
-    /// Touche de télécommande pendant la lecture (flèches et validation).
-    /// Interface masquée : gauche/droite reculent ou avancent de 10 s, valider met en
-    /// pause (ou valide la proposition affichée), haut/bas montrent l'interface.
-    /// Interface affichée : les flèches déplacent la sélection, valider l'active.
+    /// Remote key during playback (arrows and select).
+    /// Interface hidden: left/right seek back or forward 10 s, select pauses (or accepts
+    /// the prompt on screen), up/down show the interface.
+    /// Interface shown: the arrows move the selection, select activates it.
     pub fn remote(&mut self, key: &str) -> Vec<Action> {
         let seen = self.seen;
         self.poke();
-        // La sélection de la télécommande prend le pas sur le survol de la souris.
+        // The remote's selection takes precedence over mouse hover.
         self.pointer_moved = Instant::now().checked_sub(IDLE).unwrap_or(self.pointer_moved);
         let default = if seen.prompt.is_some() { Target::Accept } else { Target::PlayPause };
         let Some(focus) = self.focus.filter(|_| seen.shown) else {
@@ -224,7 +225,7 @@ impl Osd {
             "up" | "down" => {
                 let next = if key == "up" { row.saturating_sub(1) } else { (row + 1).min(rows.len() - 1) };
                 let targets = &rows[next];
-                // D'une ligne d'un seul bouton vers la ligne centrale : on arrive sur lecture/pause.
+                // From a single-button row to the center row: land on play/pause.
                 let column = if rows[row].len() == 1 && targets.len() == 3 { 1 } else { column.min(targets.len() - 1) };
                 self.focus = Some(targets[column]);
                 Vec::new()
@@ -253,8 +254,8 @@ impl Osd {
         }
     }
 
-    /// Masque l'interface si elle est affichée (touche retour) ; renvoie faux sinon,
-    /// ou en pause, où elle reste affichée.
+    /// Hides the interface if it is shown (back key); returns false otherwise, or when
+    /// paused, where it stays shown.
     pub fn hide(&mut self) -> bool {
         if !self.seen.shown || self.seen.paused {
             return false;
@@ -264,7 +265,7 @@ impl Osd {
         true
     }
 
-    /// Ouvre le panneau des pistes ; la sélection se placera sur les sous-titres actifs.
+    /// Opens the tracks panel; the selection will start on the active subtitles.
     pub fn open_menu(&mut self) {
         self.menu = Some(Focus { column: 1, row: usize::MAX });
         self.poke();
@@ -318,7 +319,7 @@ impl Osd {
             self.poke();
             self.pointer_moved = Instant::now();
         }
-        // Souris immobile (curseur masqué) ou télécommande utilisée depuis : pas de survol.
+        // Still mouse (cursor hidden) or remote used since: no hover.
         let hover = hover.filter(|_| self.pointer_moved.elapsed() < IDLE);
 
         let menu = self.menu.is_some();
@@ -327,7 +328,7 @@ impl Osd {
         }
         let idle = if self.focus.is_some() { REMOTE_IDLE } else { IDLE };
         let visible = view.paused || menu || self.scrub.is_some() || self.activity.elapsed() < idle;
-        // Fondu vers l'opacité visée, sans la dépasser ni osciller une fois atteinte.
+        // Fade toward the target opacity, without overshooting or oscillating once reached.
         let target_alpha = if visible { 1.0 } else { 0.0 };
         let step = dt / 0.2;
         self.alpha += (target_alpha - self.alpha).clamp(-step, step);
@@ -338,7 +339,7 @@ impl Osd {
             live: view.live,
             prompt: view.prompt.as_ref().map(|prompt| matches!(prompt, Prompt::NextUp { .. })),
         };
-        // La sélection suit ce qui existe encore à l'écran.
+        // The selection follows what still exists on screen.
         if !visible {
             self.focus = None;
         }
@@ -351,7 +352,7 @@ impl Osd {
         let current_focus = self.focus;
         let focused = |target| current_focus == Some(target);
 
-        // Boutons actifs : ceux de l'interface quand elle est visible, la proposition toujours.
+        // Active buttons: the interface's while it is visible, the prompt's always.
         let mut hits: Vec<Hit> = Vec::new();
         if self.alpha > 0.5 {
             if !view.live && view.duration > 0.0 {
@@ -367,7 +368,7 @@ impl Osd {
         let hit_at = |position: Pos2| hits.iter().find(|hit| hit.rect.contains(position)).map(|hit| hit.target);
         let hovered = hover.and_then(hit_at);
 
-        // Clics : l'action part au relâchement, sur l'élément où l'appui a commencé.
+        // Clicks: the action fires on release, on the element where the press started.
         if pressed {
             self.pressed = Some(hover.and_then(hit_at).unwrap_or(Target::Video));
         }
@@ -401,14 +402,14 @@ impl Osd {
                         actions.push(action);
                     }
                 }
-                // Un clic hors du panneau le referme seulement.
+                // A click outside the panel only closes it.
                 Some(Target::Video) if hovered.is_none() && self.menu.is_some() => self.menu = None,
                 Some(Target::Video) if hovered.is_none() => actions.push(Action::TogglePause),
                 _ => {}
             }
             self.scrub = None;
         }
-        // Le double clic a déjà mis en pause puis relancé : il ne reste qu'à basculer le plein écran.
+        // The double click already paused and resumed: only fullscreen is left to toggle.
         if double && hovered.is_none() && self.menu.is_none() {
             actions.push(Action::ToggleFullscreen);
         }
@@ -460,7 +461,7 @@ impl Osd {
         }
         let highlighted = hovered.or(self.focus.filter(|target| matches!(target, Target::Accept | Target::Dismiss)));
         let animating = paint_prompt(painter, screen, rem, view.prompt.as_ref(), &prompt_hits, highlighted, images);
-        // Bouton de proposition sélectionné à la télécommande : contour, comme les cartes.
+        // Prompt button selected with the remote: outline, like the cards.
         let selected = prompt_hits.iter().find(|hit| self.focus == Some(hit.target) && hovered.is_none());
         if let Some(hit) = selected {
             let ring = hit.rect.expand(0.25 * rem);
@@ -479,7 +480,7 @@ impl Osd {
     }
 }
 
-// ------------------------------------------------------------------ éléments
+// ------------------------------------------------------------------ elements
 
 fn paint_shades(painter: &egui::Painter, screen: Rect, rem: f32, alpha: f32) {
     let top = Rect::from_min_max(screen.min, Pos2::new(screen.right(), screen.top() + 11.0 * rem));
@@ -488,7 +489,7 @@ fn paint_shades(painter: &egui::Painter, screen: Rect, rem: f32, alpha: f32) {
     theme::fade(painter, bottom, false, &[(0.0, 0.0), (1.0, 0.85 * alpha)]);
 }
 
-/// Logo à gauche du titre quand le serveur en a un, comme sous Kodi.
+/// Logo left of the title when the server has one, as in Kodi.
 fn paint_title(
     painter: &egui::Painter,
     screen: Rect,
@@ -503,13 +504,13 @@ fn paint_title(
             let detail: Vec<String> = [item.episode_code(), Some(item.name.clone())].into_iter().flatten().collect();
             (series.clone(), detail.join(" · "))
         }
-        _ if live => (item.name.clone(), "En direct".to_owned()),
+        _ if live => (item.name.clone(), t("Live", "En direct").to_owned()),
         _ => (item.name.clone(), item.production_year.map(|year| year.to_string()).unwrap_or_default()),
     };
     let mut left = screen.left() + GUTTER * rem;
     let top = screen.top() + 2.4 * rem;
     if let Some(loaded) = browse::logo(item).and_then(|image| images.get(&image)) {
-        // Mis à l'échelle dans une boîte de 3,8 × 12 rem, centré sur le bloc de texte.
+        // Scaled into a 3.8 × 12 rem box, centered on the text block.
         let size = loaded.texture.size_vec2();
         let scale = (3.8 * rem / size.y).min(12.0 * rem / size.x);
         let logo = Rect::from_min_size(Pos2::new(left, top - 0.1 * rem), size * scale);
@@ -551,7 +552,7 @@ fn paint_bar(painter: &egui::Painter, layout: &Layout, view: &View, position: f6
     text.paint(painter, Pos2::new(layout.bar.right() - width, y));
 }
 
-/// Temps visé, affiché au-dessus de la barre sous le pointeur.
+/// Target time, shown above the bar under the pointer.
 fn paint_bubble(painter: &egui::Painter, layout: &Layout, x: f32, label: &str, alpha: f32) {
     let rem = layout.rem;
     let text = Text::line(label, 0.95 * rem, theme::BACKGROUND, 8.0 * rem).layout(painter);
@@ -563,7 +564,8 @@ fn paint_bubble(painter: &egui::Painter, layout: &Layout, x: f32, label: &str, a
 }
 
 fn paint_live(painter: &egui::Painter, bar: Rect, rem: f32, alpha: f32) {
-    let text = Text { family: theme::semibold(), ..Text::line("EN DIRECT", 0.9 * rem, white(alpha), 10.0 * rem) };
+    let text =
+        Text { family: theme::semibold(), ..Text::line(t("LIVE", "EN DIRECT"), 0.9 * rem, white(alpha), 10.0 * rem) };
     let galley = text.layout(painter);
     let rect = Rect::from_min_size(
         Pos2::new(bar.left(), bar.center().y - 0.8 * rem),
@@ -575,7 +577,7 @@ fn paint_live(painter: &egui::Painter, bar: Rect, rem: f32, alpha: f32) {
     painter.galley(Pos2::new(rect.left() + 1.4 * rem, rect.center().y - galley.size().y / 2.0), galley, theme::TEXT);
 }
 
-// ------------------------------------------------------------------ icônes (dessinées : aucune police requise)
+// ------------------------------------------------------------------ icons (drawn: no font needed)
 
 fn play_icon(painter: &egui::Painter, center: Pos2, height: f32, color: Color32) {
     let half = height / 2.0;
@@ -596,7 +598,7 @@ fn pause_icon(painter: &egui::Painter, center: Pos2, height: f32, color: Color32
     }
 }
 
-/// Flèche circulaire avec « 10 » au centre ; `forward` la fait tourner dans le sens horaire.
+/// Circular arrow with "10" in the middle; `forward` turns it clockwise.
 fn replay_icon(painter: &egui::Painter, center: Pos2, radius: f32, forward: bool, color: Color32) {
     let mirror = if forward { 1.0 } else { -1.0 };
     let point = |angle: f32| center + Vec2::new(mirror * radius * angle.cos(), radius * angle.sin());
@@ -604,7 +606,7 @@ fn replay_icon(painter: &egui::Painter, center: Pos2, radius: f32, forward: bool
     let steps = 40;
     let arc: Vec<Pos2> = (0..=steps).map(|step| point(from + (to - from) * step as f32 / steps as f32)).collect();
     painter.add(Shape::line(arc, Stroke::new(0.13 * radius * 1.2, color)));
-    // Pointe de flèche à l'extrémité, au sommet du cercle.
+    // Arrow head at the end, at the top of the circle.
     let tip = point(to);
     let size = 0.42 * radius;
     let head = vec![
@@ -622,13 +624,13 @@ fn replay_icon(painter: &egui::Painter, center: Pos2, radius: f32, forward: bool
     label.paint(painter, Pos2::new(center.x, center.y - height / 2.0));
 }
 
-// ------------------------------------------------------------------ propositions
+// ------------------------------------------------------------------ prompts
 
 const CARD_WIDTH: f32 = 26.0;
 const THUMB_WIDTH: f32 = 10.5;
 const BUTTON_HEIGHT: f32 = 2.8;
 
-/// Rectangles des boutons de la proposition, calculés avant le dessin pour le clic.
+/// Rectangles of the prompt buttons, computed before drawing for clicks.
 fn prompt_layout(screen: Rect, rem: f32, prompt: Option<&Prompt>, painter: &egui::Painter) -> Vec<Hit> {
     let right = screen.right() - GUTTER * rem;
     let bottom = screen.bottom() - 7.6 * rem;
@@ -660,7 +662,7 @@ fn card_rect(right: f32, bottom: f32, rem: f32) -> Rect {
     Rect::from_min_max(Pos2::new(right - CARD_WIDTH * rem, bottom - height * rem), Pos2::new(right, bottom))
 }
 
-/// Bouton plein (validé par Entrée) ou discret (Échap).
+/// Filled button (accepted with Enter) or subtle one (Escape).
 fn button(painter: &egui::Painter, rect: Rect, rem: f32, label: &str, primary: bool, hovered: bool) {
     let (fill, text) = match (primary, hovered) {
         (true, false) => (theme::TEXT, theme::BACKGROUND),
@@ -714,7 +716,8 @@ fn paint_prompt(
             let text_left = thumb.right() + rem;
             let width = inner.right() - text_left;
             let mut y = thumb.top();
-            y += Text::line("Épisode suivant", 0.85 * rem, theme::DIM, width).paint(painter, Pos2::new(text_left, y));
+            y += Text::line(t("Next episode", "Épisode suivant"), 0.85 * rem, theme::DIM, width)
+                .paint(painter, Pos2::new(text_left, y));
             y += 0.2 * rem;
             let name = match item.index_number {
                 Some(number) => format!("{number}. {}", item.name),
@@ -729,21 +732,28 @@ fn paint_prompt(
 
             let seconds = remaining.ceil().max(1.0) as i64;
             let (accept, dismiss) = (hits[0].rect, hits[1].rect);
-            button(painter, accept, rem, &format!("Lecture dans {seconds} s"), true, is(Target::Accept));
-            // Le compte à rebours se lit aussi comme une barre qui se remplit dans le bouton.
+            button(
+                painter,
+                accept,
+                rem,
+                &format!("{} {seconds} s", t("Playing in", "Lecture dans")),
+                true,
+                is(Target::Accept),
+            );
+            // The countdown also reads as a bar filling the button.
             let progress = (1.0 - remaining / COUNTDOWN).clamp(0.0, 1.0) as f32;
             let track = Rect::from_min_max(Pos2::new(accept.left(), accept.bottom() - 0.22 * rem), accept.max);
             let filled =
                 Rect::from_min_max(track.min, Pos2::new(track.left() + track.width() * progress, track.bottom()));
             let clipped = painter.with_clip_rect(filled.intersect(painter.clip_rect()));
             clipped.rect_filled(accept, theme::corner(0.35 * rem), Color32::from_black_alpha(110));
-            button(painter, dismiss, rem, "Voir le générique", false, is(Target::Dismiss));
+            button(painter, dismiss, rem, t("Watch credits", "Voir le générique"), false, is(Target::Dismiss));
             animating
         }
     }
 }
 
-// ------------------------------------------------------------------ sous-titres et audio
+// ------------------------------------------------------------------ subtitles and audio
 
 const MENU_COLUMN: f32 = 15.0;
 const MENU_ROW: f32 = 2.4;
@@ -755,7 +765,7 @@ fn tracks_button(screen: Rect, rem: f32) -> Rect {
     Rect::from_min_size(Pos2::new(screen.right() - GUTTER * rem - size, screen.top() + 2.2 * rem), Vec2::splat(size))
 }
 
-/// Bulle de dialogue avec deux lignes de texte.
+/// Speech bubble with two lines of text.
 fn tracks_icon(painter: &egui::Painter, center: Pos2, rem: f32, color: Color32) {
     let stroke = Stroke::new(0.14 * rem, color);
     let body = Rect::from_center_size(center - Vec2::new(0.0, 0.15 * rem), Vec2::new(1.9, 1.35) * rem);
@@ -779,14 +789,14 @@ fn check_icon(painter: &egui::Painter, center: Pos2, rem: f32, color: Color32) {
     painter.add(Shape::line(points.to_vec(), Stroke::new(0.14 * rem, color)));
 }
 
-/// Entrées d'une colonne : libellé, piste visée (`None` : désactiver), active ou non.
+/// Entries of a column: label, target track (`None`: disable), active or not.
 fn entries(view: &View, column: usize) -> Vec<(String, Option<i64>, bool)> {
     let tracks = if column == 0 { &view.audio } else { &view.subtitles };
     let mut entries: Vec<_> =
         tracks.iter().map(|track| (track.label.clone(), Some(track.id), track.selected)).collect();
     if column == 1 {
         let none = !tracks.iter().any(|track| track.selected);
-        entries.insert(0, ("Désactivés".to_owned(), None, none));
+        entries.insert(0, (t("Off", "Désactivés").to_owned(), None, none));
     }
     entries
 }
@@ -804,8 +814,8 @@ struct MenuRow {
     selected: bool,
 }
 
-/// Lignes visibles du panneau. Chaque colonne défile pour garder visible l'entrée
-/// sélectionnée au clavier, ou à défaut la piste active.
+/// Visible rows of the panel. Each column scrolls to keep the keyboard selection in
+/// view, or else the active track.
 fn menu_rows(screen: Rect, rem: f32, layout: &Layout, view: &View, focus: Focus) -> Vec<MenuRow> {
     let panel = menu_panel(screen, rem, layout, view);
     let visible = visible_rows(panel, rem);
@@ -844,7 +854,7 @@ fn menu_panel(screen: Rect, rem: f32, layout: &Layout, view: &View) -> Rect {
 
 fn paint_menu(painter: &egui::Painter, panel: Rect, rem: f32, rows: &[MenuRow], focus: Focus, hovered: Option<Target>) {
     painter.rect_filled(panel, theme::corner(0.6 * rem), Color32::from_rgba_unmultiplied(20, 20, 22, 240));
-    for (column, title) in ["Audio", "Sous-titres"].into_iter().enumerate() {
+    for (column, title) in ["Audio", t("Subtitles", "Sous-titres")].into_iter().enumerate() {
         let x = panel.left() + (MENU_PADDING + column as f32 * (MENU_COLUMN + 1.0) + 0.8) * rem;
         let heading =
             Text { family: theme::semibold(), ..Text::line(title, 0.95 * rem, theme::DIM, MENU_COLUMN * rem) };
@@ -867,11 +877,11 @@ fn paint_menu(painter: &egui::Painter, panel: Rect, rem: f32, rows: &[MenuRow], 
 }
 
 impl Osd {
-    /// Clavier du panneau des pistes : flèches, Entrée pour choisir, Échap ou `c` pour fermer.
+    /// Keyboard for the tracks panel: arrows, Enter to choose, Escape or `c` to close.
     fn menu_keys(&mut self, ctx: &egui::Context, view: &View, actions: &mut Vec<Action>) {
         let Some(mut focus) = self.menu else { return };
-        // À l'ouverture, la sélection se place sur la piste active. Les touches de cette image
-        // ont servi à ouvrir le panneau (`c`) : elles ne doivent pas le refermer aussitôt.
+        // On opening, the selection starts on the active track. This frame's keys opened
+        // the panel (`c`): they must not close it right away.
         if focus.row == usize::MAX {
             focus.row = entries(view, focus.column).iter().position(|(_, _, selected)| *selected).unwrap_or(0);
             self.menu = Some(focus);

@@ -2,7 +2,7 @@
 name = "jf"
 version = "0.2.0"
 edition = "2021"
-description = "Client Jellyfin natif pour le salon, avec mpv intégré"
+description = "Lightweight Jellyfin HTPC client with a Prime Video style interface and Apple TV remote support"
 repository = "https://github.com/superlemon57/jf"
 
 [dependencies]

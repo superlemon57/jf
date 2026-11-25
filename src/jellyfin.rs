@@ -1,4 +1,4 @@
-//! Client de l'API Jellyfin (requêtes bloquantes, à appeler hors du fil d'interface).
+//! Jellyfin API client (blocking requests, to call off the interface thread).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::config::Config;
+use crate::i18n::t;
 
 const ITEM_QUERY: [(&str, &str); 3] =
     [("Fields", "Overview"), ("ImageTypeLimit", "1"), ("EnableImageTypes", "Primary,Backdrop,Logo")];
@@ -23,7 +24,7 @@ pub struct Error {
 
 impl Error {
     pub fn timeout() -> Self {
-        Self { message: "délai dépassé".into() }
+        Self { message: t("timed out", "délai dépassé").into() }
     }
 }
 
@@ -36,10 +37,14 @@ impl fmt::Display for Error {
 impl From<ureq::Error> for Error {
     fn from(error: ureq::Error) -> Self {
         match error {
-            ureq::Error::Status(401, _) => Self { message: "accès refusé par le serveur".into() },
-            ureq::Error::Status(code, _) => Self { message: format!("le serveur a répondu {code}") },
+            ureq::Error::Status(401, _) => {
+                Self { message: t("access denied by the server", "accès refusé par le serveur").into() }
+            }
+            ureq::Error::Status(code, _) => {
+                Self { message: format!("{} {code}", t("the server answered", "le serveur a répondu")) }
+            }
             ureq::Error::Transport(transport) => {
-                Self { message: format!("serveur injoignable ({})", transport.kind()) }
+                Self { message: format!("{} ({})", t("server unreachable", "serveur injoignable"), transport.kind()) }
             }
         }
     }
@@ -47,13 +52,13 @@ impl From<ureq::Error> for Error {
 
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Self {
-        Self { message: format!("réponse illisible ({error})") }
+        Self { message: format!("{} ({error})", t("unreadable answer", "réponse illisible")) }
     }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Jellyfin envoie parfois `null` là où on attend une valeur : on prend alors le défaut.
+/// Jellyfin sometimes sends `null` where a value is expected: use the default then.
 fn or_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(
     deserializer: D,
 ) -> std::result::Result<T, D::Error> {
@@ -151,7 +156,7 @@ struct ItemList {
     items: Vec<Item>,
 }
 
-/// Passage repéré dans un épisode (générique de début, récapitulatif, générique de fin).
+/// Segment found in an episode (intro, recap, end credits).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct MediaSegment {
@@ -191,7 +196,7 @@ impl Item {
         ticks_to_seconds(self.run_time_ticks.unwrap_or(0))
     }
 
-    /// Position de reprise en secondes, ou 0 s'il n'y a rien à reprendre.
+    /// Resume position in seconds, or 0 if there is nothing to resume.
     pub fn resume_seconds(&self) -> f64 {
         if self.user_data.played {
             return 0.0;
@@ -203,7 +208,7 @@ impl Item {
         Some(format!("S{} E{}", self.parent_index_number?, self.index_number?))
     }
 
-    /// Titre complet, pour le lecteur et la télécommande.
+    /// Full title, for the player and the remote.
     pub fn play_title(&self) -> String {
         match (&self.series_name, self.kind.as_str()) {
             (Some(series), "Episode") => match self.episode_code() {
@@ -215,7 +220,7 @@ impl Item {
     }
 }
 
-/// Sous-titre externe à charger dans le lecteur.
+/// External subtitle to load in the player.
 pub struct Subtitle {
     pub url: String,
     pub title: String,
@@ -255,7 +260,7 @@ impl Client {
         }
     }
 
-    /// Trouve le serveur à partir d'une adresse saisie, avec ou sans `http(s)://`.
+    /// Finds the server from a typed address, with or without `http(s)://`.
     pub fn discover(address: &str, device_id: &str) -> Result<Self> {
         let address = address.trim();
         let candidates = if address.contains("://") {
@@ -271,7 +276,7 @@ impl Client {
                 Err(error) => last = Some(error),
             }
         }
-        Err(last.expect("au moins une adresse essayée"))
+        Err(last.expect("at least one address tried"))
     }
 
     fn authorization(&self) -> String {
@@ -287,7 +292,7 @@ impl Client {
         header
     }
 
-    /// En-tête à donner à mpv pour lire un flux du serveur.
+    /// Header to give mpv to play a stream from the server.
     pub fn stream_header(&self) -> String {
         format!("Authorization: MediaBrowser Token=\"{}\"", self.token)
     }
@@ -318,13 +323,13 @@ impl Client {
     fn items(&self, path: &str, query: &[(&str, &str)]) -> Result<Vec<Item>> {
         let mut full = vec![("userId", self.user_id.as_str())];
         full.extend_from_slice(&ITEM_QUERY);
-        // Un paramètre répété remplace la valeur par défaut.
+        // A repeated parameter replaces the default value.
         full.retain(|(name, _)| !query.iter().any(|(given, _)| given == name));
         full.extend_from_slice(query);
         Ok(self.get::<ItemList>(path, &full)?.items)
     }
 
-    // ---------------------------------------------------------------- connexion
+    // ---------------------------------------------------------------- sign-in
 
     fn accept_session(&mut self, session: &Value) -> Result<()> {
         let token = session["AccessToken"].as_str();
@@ -335,7 +340,7 @@ impl Client {
                 self.user_id = user.to_owned();
                 Ok(())
             }
-            _ => Err(Error { message: "réponse de connexion inattendue".into() }),
+            _ => Err(Error { message: t("unexpected sign-in answer", "réponse de connexion inattendue").into() }),
         }
     }
 
@@ -353,7 +358,7 @@ impl Client {
         }
     }
 
-    /// `Ok(false)` tant que le code n'a pas été validé sur un autre appareil.
+    /// `Ok(false)` until the code is approved on another device.
     pub fn quick_connect_finish(&mut self, secret: &str) -> Result<bool> {
         let state: Value = self.get("/QuickConnect/Connect", &[("secret", secret)])?;
         if state["Authenticated"].as_bool() != Some(true) {
@@ -365,7 +370,7 @@ impl Client {
         Ok(true)
     }
 
-    // ---------------------------------------------------------------- bibliothèque
+    // ---------------------------------------------------------------- library
 
     pub fn views(&self) -> Result<Vec<Item>> {
         Ok(self.get::<ItemList>("/UserViews", &[("userId", &self.user_id)])?.items)
@@ -424,7 +429,7 @@ impl Client {
         }
     }
 
-    /// Tout ce qui est lisible sous un élément (série, saison, collection…), dans un ordre aléatoire.
+    /// Everything playable under an item (series, season, collection…), in random order.
     pub fn shuffled(&self, parent: &Item) -> Result<Vec<Item>> {
         self.items(
             "/Items",
@@ -438,12 +443,12 @@ impl Client {
         )
     }
 
-    /// L'épisode donné et ceux qui le suivent dans la série.
+    /// The given episode and the ones after it in the series.
     pub fn episodes_from(&self, series_id: &str, episode_id: &str) -> Result<Vec<Item>> {
         self.items(&format!("/Shows/{series_id}/Episodes"), &[("startItemId", episode_id), ("Limit", "50")])
     }
 
-    /// Passages repérés par le serveur (Jellyfin 10.10 et plus, avec un plugin comme Intro Skipper).
+    /// Segments found by the server (Jellyfin 10.10 and later, with a plugin such as Intro Skipper).
     pub fn segments(&self, id: &str) -> Result<Vec<MediaSegment>> {
         Ok(self.get::<SegmentList>(&format!("/MediaSegments/{id}"), &[])?.items)
     }
@@ -452,7 +457,7 @@ impl Client {
         self.items("/Items", &[("Ids", id), ("Fields", "Overview,MediaSources")])?
             .into_iter()
             .next()
-            .ok_or(Error { message: "élément introuvable".into() })
+            .ok_or(Error { message: t("item not found", "élément introuvable").into() })
     }
 
     pub fn live_sources(&self, channel_id: &str) -> Result<Vec<MediaSource>> {
@@ -494,7 +499,7 @@ impl Client {
         Ok(())
     }
 
-    /// `event` : "" au démarrage, "/Progress" pendant la lecture, "/Stopped" à la fin.
+    /// `event`: "" at start, "/Progress" during playback, "/Stopped" at the end.
     pub fn report(&self, event: &str, body: Value) -> Result<()> {
         self.send("POST", &format!("/Sessions/Playing{event}"), &[], Some(body))?;
         Ok(())

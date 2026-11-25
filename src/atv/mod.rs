@@ -1,9 +1,9 @@
-//! Télécommande Apple TV d'iOS (Centre de contrôle et app « Remote ») : jf se présente
-//! sur le réseau local comme une Apple TV, s'appaire avec un code affiché à l'écran,
-//! puis traduit boutons, gestes et commandes de lecture en commandes de jf.
+//! iOS Apple TV remote (Control Center and the Remote app): jf presents itself on the
+//! local network as an Apple TV, pairs with a code shown on screen, then turns buttons,
+//! gestures and playback commands into jf commands.
 //!
-//! Le protocole (Companion Link) a été reconstitué par pyatv ; le codec OPACK, le SRP,
-//! le TLV et le chiffrement viennent de myRemote (licence MIT), la session est propre à jf.
+//! The protocol (Companion Link) was reverse-engineered by pyatv; the OPACK codec, SRP,
+//! TLV and encryption come from myRemote (MIT license), the session is jf's own.
 
 mod archive;
 mod crypto;
@@ -15,7 +15,6 @@ mod tlv;
 use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -32,18 +31,18 @@ use crate::remote;
 const DEVICE_MODEL: &str = "AppleTV14,1";
 const SOURCE_VERSION: &str = "715.2";
 const COMPANION_FLAGS: &str = "0x36782";
-/// Port Companion Link habituel d'une Apple TV ; un autre est pris s'il est occupé.
+/// Usual Companion Link port of an Apple TV; another one is used if it is taken.
 const PORT: u16 = 49153;
 const PAIRING_WINDOW: Duration = Duration::from_secs(120);
-/// Essais de code autorisés par fenêtre d'appairage.
+/// Code attempts allowed per pairing window.
 const PAIRING_ATTEMPTS: u8 = 3;
-/// Délai avant une nouvelle fenêtre après un code faux, contre la recherche systématique.
+/// Delay before a new window after a wrong code, against brute force.
 const PAIRING_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 32;
 
-/// Journal du protocole, toujours écrit dans `~/.cache/jf/apple-tv.log` (le précédent est
-/// gardé en `.log.1`) pour qu'un souci avec l'iPhone laisse une trace sans rien préparer ;
-/// `JF_LOG=1` le recopie aussi sur la sortie d'erreur.
+/// Protocol log, always written to `apple-tv.log` in the cache folder (the previous one is
+/// kept as `.log.1`) so that a problem with the iPhone leaves a trace without any setup;
+/// `JF_LOG=1` also copies it to standard error.
 static LOG: Mutex<Option<fs::File>> = Mutex::new(None);
 const LOG_LIMIT: u64 = 8 * 1024 * 1024;
 
@@ -52,9 +51,10 @@ fn open_log() {
     let path = directory.join("apple-tv.log");
     let _ = fs::create_dir_all(&directory);
     let _ = fs::rename(&path, directory.join("apple-tv.log.1"));
-    if let Ok(mut file) = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path) {
-        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        let _ = writeln!(file, "jf {} — démarré à {} (secondes Unix)", env!("CARGO_PKG_VERSION"), since.as_secs());
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let header = format!("jf {} — started at {} (Unix seconds)\n", env!("CARGO_PKG_VERSION"), since.as_secs());
+    if crate::config::write_private(&path, header.as_bytes()).is_ok() {
+        let Ok(file) = fs::OpenOptions::new().append(true).open(&path) else { return };
         *LOG.lock().unwrap() = Some(file);
     }
     clock();
@@ -72,7 +72,7 @@ pub(crate) fn log_line(line: &str) {
     }
 }
 
-/// Secondes écoulées depuis l'ouverture du journal.
+/// Seconds since the log was opened.
 fn clock() -> f64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
@@ -85,7 +85,7 @@ macro_rules! trace {
 }
 pub(crate) use trace;
 
-/// Identité stable de l'« Apple TV » jf, dérivée d'une clé privée enregistrée.
+/// Stable identity of the jf "Apple TV", derived from a saved private key.
 struct Identity {
     private_key: [u8; 32],
     identifier: String,
@@ -93,21 +93,21 @@ struct Identity {
 }
 
 impl Identity {
-    /// Valeur dérivée de l'identifiant public, en hexadécimal minuscule comme sur une
-    /// vraie Apple TV ou un HomePod (rpHI, rpAD…). La clé privée n'y entre jamais.
+    /// Value derived from the public identifier, in lowercase hex like on a real Apple TV
+    /// or HomePod (rpHI, rpAD…). The private key never goes into it.
     fn alias(&self, label: &str) -> String {
         let hash = Sha256::new().chain_update(label).chain_update(self.identifier.as_bytes()).finalize();
         hash[..6].iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
-    /// UUID stable dérivé de l'identifiant public.
+    /// Stable UUID derived from the public identifier.
     fn uuid(&self, label: &str) -> String {
         let hash = Sha256::new().chain_update(label).chain_update(self.identifier.as_bytes()).finalize();
         let hex: String = hash[..16].iter().map(|byte| format!("{byte:02X}")).collect();
         format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
     }
 
-    /// Adresse Bluetooth annoncée (rpBA), aussi donnée comme `_pubID`.
+    /// Advertised Bluetooth address (rpBA), also given as `_pubID`.
     fn bluetooth(&self) -> String {
         self.mac.map(|byte| format!("{byte:02X}")).join(":")
     }
@@ -127,13 +127,13 @@ struct PairingState {
     blocked_until: Option<Instant>,
 }
 
-/// État partagé entre les connexions et l'interface.
+/// State shared between the connections and the interface.
 pub struct Shared {
     name: String,
     identity: Identity,
     directory: PathBuf,
     pairing: Mutex<PairingState>,
-    /// Message à afficher par l'interface (« iPhone jumelé »).
+    /// Message for the interface to show ("iPhone paired").
     notice: Mutex<Option<String>>,
     pub(crate) state: remote::Shared,
     commands: Sender<remote::Command>,
@@ -141,12 +141,12 @@ pub struct Shared {
     links: Links,
 }
 
-/// Connexions ouvertes, pour libérer celles qu'iOS laisse sans télécommande.
+/// Open connections, to free the ones iOS leaves without a remote.
 ///
-/// iOS (rapportd, sharingd) ouvre des connexions de fond qui ne portent jamais de
-/// télécommande ; tant qu'une telle connexion reste ouverte, la télécommande de l'iPhone
-/// attend dessus et reste sur « Connexion » (journaux du 25/11/2026, et atv-core).
-/// Une connexion qui sert la télécommande n'est jamais fermée par une autre.
+/// iOS (rapportd, sharingd) opens background connections that never carry a remote;
+/// while one stays open, the iPhone's remote waits on it and stays on "Connecting"
+/// (seen with iOS 27, and in atv-core). A connection serving the remote is never closed
+/// because of another one.
 #[derive(Default)]
 pub(crate) struct Links {
     next: AtomicU64,
@@ -160,7 +160,7 @@ struct Link {
     state: Arc<LinkState>,
 }
 
-/// État partagé d'une connexion : utilisée par la télécommande, ou à fermer.
+/// Shared state of a connection: used by the remote, or to be closed.
 #[derive(Default)]
 pub(crate) struct LinkState {
     pub(crate) in_use: AtomicBool,
@@ -168,8 +168,8 @@ pub(crate) struct LinkState {
 }
 
 impl Links {
-    /// Enregistre une nouvelle connexion ; les connexions inutilisées du même appareil
-    /// sont fermées, l'iPhone repartant de la nouvelle.
+    /// Registers a new connection; idle connections from the same device are closed, the
+    /// iPhone carrying on with the new one.
     pub(crate) fn open(&self, peer: IpAddr) -> (u64, Arc<LinkState>) {
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let state = Arc::new(LinkState::default());
@@ -181,8 +181,8 @@ impl Links {
         (id, state)
     }
 
-    /// L'iPhone `controller` s'est vérifié sur la connexion `id` : ses autres connexions
-    /// inutilisées sont fermées (une Apple TV ne garde qu'une connexion par appairage).
+    /// iPhone `controller` verified on connection `id`: its other idle connections are
+    /// closed (an Apple TV keeps one connection per pairing).
     pub(crate) fn verified(&self, id: u64, controller: &[u8]) {
         let mut open = self.open.lock().unwrap();
         for link in open.iter().filter(|link| link.id != id && link.controller.as_deref() == Some(controller)) {
@@ -201,7 +201,7 @@ impl Links {
 impl Link {
     fn release_if_idle(&self, newer: u64) {
         if !self.state.in_use.load(Ordering::SeqCst) && !self.state.close.swap(true, Ordering::SeqCst) {
-            trace!("connexion n° {} inutilisée, fermée au profit de la n° {newer}", self.id);
+            trace!("connection #{} idle, closed in favor of #{newer}", self.id);
         }
     }
 }
@@ -212,17 +212,17 @@ pub struct Handle {
     stop: Arc<AtomicBool>,
 }
 
-/// Annonce Bonjour en cours, sur une adresse du réseau local.
+/// Current Bonjour announcement, on a local network address.
 struct Advert {
     ip: Ipv4Addr,
     daemon: ServiceDaemon,
-    /// Noms complets des services annoncés, pour les retirer.
+    /// Full names of the announced services, to withdraw them.
     services: Vec<String>,
 }
 
 impl Advert {
-    /// Retire l'annonce : sans cela, l'iPhone garde l'ancienne en cache (plus d'une heure)
-    /// et peut viser un appareil ou une adresse qui n'existe plus.
+    /// Withdraws the announcement: otherwise the iPhone keeps the old one cached (over an
+    /// hour) and may aim at a device or an address that no longer exists.
     fn withdraw(self) {
         for service in &self.services {
             if let Ok(done) = self.daemon.unregister(service) {
@@ -230,7 +230,7 @@ impl Advert {
             }
         }
         let _ = self.daemon.shutdown();
-        trace!("annonce retirée de {}", self.ip);
+        trace!("announcement withdrawn from {}", self.ip);
     }
 }
 
@@ -243,11 +243,11 @@ impl Drop for Handle {
     }
 }
 
-/// Intervalle de vérification de l'adresse locale (changement de réseau, bail DHCP).
+/// How often the local address is checked (network change, DHCP lease).
 const ADDRESS_CHECK: Duration = Duration::from_secs(15);
 
-/// Tient l'annonce à jour : elle suit l'adresse locale, réapparaît quand le réseau revient
-/// et disparaît quand il n'y en a plus.
+/// Keeps the announcement up to date: it follows the local address, comes back with the
+/// network and goes away when there is none.
 fn keep_advertised(shared: Arc<Shared>, port: u16, advert: Arc<Mutex<Option<Advert>>>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
         let ip = local_ip();
@@ -259,13 +259,13 @@ fn keep_advertised(shared: Arc<Shared>, port: u16, advert: Arc<Mutex<Option<Adve
             if let Some(ip) = ip {
                 match advertise(&shared, ip, port) {
                     Ok((daemon, services)) => {
-                        trace!("annoncé sur {ip}, port {port}");
+                        trace!("announced on {ip}, port {port}");
                         *advert.lock().unwrap() = Some(Advert { ip, daemon, services });
                     }
-                    Err(error) => trace!("annonce Bonjour impossible sur {ip} : {error}"),
+                    Err(error) => trace!("Bonjour announcement failed on {ip}: {error}"),
                 }
             } else {
-                trace!("aucune adresse sur le réseau local, annonce suspendue");
+                trace!("no local network address, announcement paused");
             }
         }
         let started = Instant::now();
@@ -276,7 +276,7 @@ fn keep_advertised(shared: Arc<Shared>, port: u16, advert: Arc<Mutex<Option<Adve
 }
 
 impl Handle {
-    /// Code à afficher pendant qu'un iPhone demande l'appairage.
+    /// Code to show while an iPhone asks to pair.
     pub fn pairing_code(&self) -> Option<(u32, Duration)> {
         let pairing = self.shared.pairing.lock().unwrap();
         let window = pairing.window.as_ref()?;
@@ -300,7 +300,7 @@ impl Shared {
         self.send(remote::Command::Key(key.to_owned()));
     }
 
-    /// Ouvre (ou reprend) la fenêtre d'appairage et renvoie le code attendu.
+    /// Opens (or resumes) the pairing window and returns the expected code.
     fn begin_pairing(&self) -> Option<(u32, u64)> {
         let mut pairing = self.pairing.lock().unwrap();
         let now = Instant::now();
@@ -320,7 +320,7 @@ impl Shared {
                 attempts: PAIRING_ATTEMPTS,
             });
         }
-        let window = pairing.window.as_mut().expect("fenêtre ouverte");
+        let window = pairing.window.as_mut().expect("window open");
         window.attempts -= 1;
         let result = (window.pin, window.generation);
         self.ui.request_repaint();
@@ -343,11 +343,11 @@ impl Shared {
             .as_ref()
             .is_some_and(|window| window.generation == generation && Instant::now() < window.expires);
         if !open {
-            return Err("fenêtre d'appairage fermée".into());
+            return Err("pairing window closed".into());
         }
-        write_private(&self.controller_file(id), &key).map_err(|error| error.to_string())?;
+        crate::config::write_private(&self.controller_file(id), &key).map_err(|error| error.to_string())?;
         pairing.window = None;
-        *self.notice.lock().unwrap() = Some("iPhone jumelé".into());
+        *self.notice.lock().unwrap() = Some(crate::i18n::t("iPhone paired", "iPhone jumelé").into());
         self.ui.request_repaint();
         Ok(())
     }
@@ -362,22 +362,14 @@ impl Shared {
     }
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-    file.write_all(bytes)
-}
-
 fn load_identity(directory: &Path) -> io::Result<Identity> {
     let path = directory.join("identity.key");
     let private_key: [u8; 32] = match fs::read(&path) {
-        Ok(bytes) => bytes.try_into().map_err(|_| io::Error::other("identity.key invalide"))?,
+        Ok(bytes) => bytes.try_into().map_err(|_| io::Error::other("invalid identity.key"))?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             let mut key = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut key);
-            write_private(&path, &key)?;
+            crate::config::write_private(&path, &key)?;
             key
         }
         Err(error) => return Err(error),
@@ -386,12 +378,12 @@ fn load_identity(directory: &Path) -> io::Result<Identity> {
     let hex: String = hash[..16].iter().map(|byte| format!("{byte:02X}")).collect();
     let identifier = format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]);
     let mut mac: [u8; 6] = hash[16..22].try_into().expect("6 octets");
-    // Adresse locale (bit 2) et non multicast (bit 1).
+    // Locally administered (bit 2) and not multicast (bit 1).
     mac[0] = (mac[0] | 2) & !1;
     Ok(Identity { private_key, identifier, mac })
 }
 
-/// Interfaces virtuelles (VPN, conteneurs, machines virtuelles) que l'iPhone ne voit pas.
+/// Virtual interfaces (VPN, containers, virtual machines) the iPhone cannot see.
 const VIRTUAL_INTERFACES: [&str; 20] = [
     "lo",
     "docker",
@@ -415,9 +407,9 @@ const VIRTUAL_INTERFACES: [&str; 20] = [
     "lxc",
 ];
 
-/// Adresse du PC sur le réseau local (Wi-Fi ou Ethernet), celle que l'iPhone peut joindre.
-/// La route par défaut passe parfois par un VPN : on retient alors l'adresse d'une vraie
-/// carte réseau.
+/// Address of the computer on the local network (Wi-Fi or Ethernet), the one the iPhone
+/// can reach. The default route sometimes goes through a VPN: the address of a real
+/// network interface is used then.
 fn local_ip() -> Option<Ipv4Addr> {
     let lan: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
         .unwrap_or_default()
@@ -430,7 +422,7 @@ fn local_ip() -> Option<Ipv4Addr> {
         .collect();
     let routed = (|| {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-        // Aucun paquet n'est envoyé : la connexion choisit seulement l'interface de sortie.
+        // No packet is sent: connecting only picks the outgoing interface.
         socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
         match socket.local_addr().ok()?.ip() {
             IpAddr::V4(ip) => Some(ip),
@@ -447,7 +439,7 @@ fn bind(port: u16) -> io::Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).or_else(|_| TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))
 }
 
-/// Démarre l'annonce Bonjour et les connexions. `name` est le nom affiché sur l'iPhone.
+/// Starts the Bonjour announcement and the connections. `name` is shown on the iPhone.
 pub fn start(
     name: &str,
     directory: PathBuf,
@@ -471,15 +463,15 @@ pub fn start(
         ui,
         links: Links::default(),
     });
-    // Première annonce tout de suite, pour signaler une erreur au lancement.
+    // First announcement right away, to report an error at startup.
     let first = match local_ip() {
         Some(ip) => {
-            let (daemon, services) = advertise(&shared, ip, port).map_err(|error| format!("Bonjour : {error}"))?;
-            trace!("annoncé sur {ip}, port {port}");
+            let (daemon, services) = advertise(&shared, ip, port).map_err(|error| format!("Bonjour: {error}"))?;
+            trace!("announced on {ip}, port {port}");
             Some(Advert { ip, daemon, services })
         }
         None => {
-            trace!("aucune adresse sur le réseau local, annonce en attente");
+            trace!("no local network address, announcement pending");
             None
         }
     };
@@ -507,10 +499,9 @@ pub fn start(
     Ok(Handle { shared, advert, stop })
 }
 
-/// Annonce le service Companion Link d'une Apple TV, seulement sur l'interface du réseau
-/// local. Comme linux-apple-remote (maintenu pour iOS 26/27), on n'annonce ni MediaRemote
-/// ni AirPlay : un iPhone qui tente ces services factices attend une réponse qui ne vient
-/// jamais, et la télécommande reste sur « Connexion ».
+/// Announces an Apple TV's Companion Link service, on the local network interface only.
+/// The remote only needs Companion Link (atvr4samsung, linux-apple-remote): no fake
+/// MediaRemote or AirPlay services.
 fn advertise(shared: &Shared, ip: Ipv4Addr, port: u16) -> Result<(ServiceDaemon, Vec<String>), mdns_sd::Error> {
     let identity = &shared.identity;
     let mac = identity.bluetooth();

@@ -1,4 +1,4 @@
-//! État de l'application et boucle principale.
+//! Application state and main loop.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Key, Pos2, Rect};
 
 use crate::config::{self, Config};
+use crate::i18n::t;
 use crate::images::Images;
 use crate::jellyfin::{Client, Item};
 use crate::mpv::{self, Mpv};
@@ -23,11 +24,11 @@ const TOAST_DURATION: Duration = Duration::from_secs(4);
 const CURSOR_TIMEOUT: Duration = Duration::from_secs(3);
 const QUICK_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Résultat d'un travail d'arrière-plan, traité par le fil d'interface.
+/// Result of a background job, handled on the interface thread.
 pub enum Message {
     Page(u64, Result<Vec<Section>, String>),
     Resolved(u64, Result<Box<Stream>, String>),
-    /// Suite de la série pour un épisode lancé seul.
+    /// Rest of the series for an episode started on its own.
     Episodes(u64, Result<Vec<Item>, String>),
     Shuffled(Result<Vec<Item>, String>),
     PlayedSaved(Result<(), String>),
@@ -35,7 +36,7 @@ pub enum Message {
     LoggedIn(Result<Client, String>),
 }
 
-/// Lance des travaux hors du fil d'interface et la réveille à leur retour.
+/// Runs jobs off the interface thread and wakes it when they return.
 #[derive(Clone)]
 pub struct Tasks {
     sender: Sender<Message>,
@@ -73,15 +74,15 @@ pub struct App {
     images: Images,
     player: Player,
     osd: Osd,
-    /// Position des sous-titres réglée par l'utilisateur, pendant qu'ils sont remontés.
+    /// Subtitle position set by the user, while they are raised.
     raised_subtitles: Option<f64>,
     remote_state: remote::Shared,
-    /// jf vu comme une Apple TV par la télécommande d'iOS.
+    /// jf seen as an Apple TV by the iOS remote.
     apple_tv: Option<crate::atv::Handle>,
     remote_inbox: Receiver<remote::Command>,
 
     login: Login,
-    /// Invalide la tentative de connexion précédente quand une nouvelle démarre.
+    /// Invalidates the previous sign-in attempt when a new one starts.
     login_attempt: Arc<AtomicU64>,
     pages: Vec<Page>,
     next_page: u64,
@@ -143,7 +144,10 @@ impl App {
                 crate::atv::start(&app.config.apple_tv, directory, remote_state.clone(), remote_sender, ctx.clone());
             match started {
                 Ok(handle) => app.apple_tv = Some(handle),
-                Err(error) => app.show_toast(format!("Télécommande Apple TV indisponible : {error}")),
+                Err(error) => app.show_toast(format!(
+                    "{}: {error}",
+                    t("Apple TV remote unavailable", "Télécommande Apple TV indisponible")
+                )),
             }
         }
         if app.config.logged_in() {
@@ -177,7 +181,7 @@ impl App {
         self.pages.push(Page::new(self.next_page, source));
     }
 
-    /// Recharge la page affichée ; les autres le seront quand on y reviendra.
+    /// Reloads the page on screen; the others reload when they are shown again.
     fn refresh(&mut self) {
         for page in &mut self.pages {
             page.stale = true;
@@ -204,7 +208,7 @@ impl App {
     fn play_focused(&mut self, from_start: bool) {
         let Some(page) = self.pages.last() else { return };
         let (Some(section), Some(item)) = (page.sections.get(page.focus.0), page.focused()) else { return };
-        // Dans une saison, un album ou la liste des chaînes, la lecture enchaîne sur la suite.
+        // In a season, an album or the channel list, playback goes on with what follows.
         let sequence = !section.mixed && matches!(item.kind.as_str(), "Episode" | "Audio" | "TvChannel");
         let (queue, index) = if sequence { (section.items.clone(), page.focus.1) } else { (vec![item.clone()], 0) };
         self.menu = None;
@@ -223,7 +227,7 @@ impl App {
     fn toggle_played(&mut self) {
         let (Some(client), Some(page)) = (self.client.clone(), self.pages.last_mut()) else { return };
         let Some(item) = page.focused_mut().filter(|item| !item.is_channel()) else { return };
-        // Mise à jour immédiate à l'écran ; la page est rechargée une fois le serveur à jour.
+        // Immediate update on screen; the page reloads once the server is up to date.
         let played = !item.user_data.played;
         item.user_data.played = played;
         item.user_data.playback_position_ticks = 0;
@@ -241,7 +245,7 @@ impl App {
             Action::TogglePlayed => self.toggle_played(),
             Action::Shuffle => {
                 let Some(client) = self.client.clone() else { return };
-                self.show_toast("Préparation de la lecture aléatoire…");
+                self.show_toast(t("Preparing shuffle…", "Préparation de la lecture aléatoire…"));
                 self.tasks.spawn(move || Message::Shuffled(client.shuffled(&menu.item).map_err(|e| e.to_string())));
             }
         }
@@ -289,7 +293,7 @@ impl App {
         self.refresh();
     }
 
-    // ---------------------------------------------------------------- événements
+    // ---------------------------------------------------------------- events
 
     fn on_outcome(&mut self, outcome: Outcome) {
         match outcome {
@@ -322,7 +326,9 @@ impl App {
                     self.osd.poke();
                 }
                 Message::Episodes(request, result) => self.player.on_episodes(request, result),
-                Message::Shuffled(Ok(items)) if items.is_empty() => self.show_toast("Rien à lire ici."),
+                Message::Shuffled(Ok(items)) if items.is_empty() => {
+                    self.show_toast(t("Nothing to play here.", "Rien à lire ici."))
+                }
                 Message::Shuffled(Ok(items)) => {
                     self.toast = None;
                     self.player.play(items, 0, true, &self.tasks);
@@ -344,7 +350,10 @@ impl App {
                             self.config.token.clone_from(&client.token);
                             self.config.user_id.clone_from(&client.user_id);
                             if let Err(error) = self.config.save() {
-                                self.show_toast(format!("Connexion non enregistrée : {error}"));
+                                self.show_toast(format!(
+                                    "{}: {error}",
+                                    t("Sign-in not saved", "Connexion non enregistrée")
+                                ));
                             }
                             self.set_client(client);
                         }
@@ -378,7 +387,7 @@ impl App {
             match command {
                 remote::Command::SeekBy(offset) => mpv(&["seek", &offset.to_string(), "relative"]),
                 remote::Command::Track(kind, id) => self.player.select_track(kind, id),
-                // Panneau « Sous-titres et audio » ouvert : la télécommande le parcourt.
+                // "Subtitles and audio" panel open: the remote navigates it.
                 remote::Command::Key(key) if playing && self.osd.menu_open() => self.osd.remote_key(&key),
                 remote::Command::Key(key) if playing => match key.as_str() {
                     "menu" => self.osd.open_menu(),
@@ -391,7 +400,7 @@ impl App {
                     "pause" => self.player.mpv.set("pause", "yes"),
                     "next" => self.player.skip(1, &self.tasks),
                     "previous" => self.player.skip(-1, &self.tasks),
-                    // Retour : masque l'interface, puis écarte le compte à rebours, puis arrête.
+                    // Back: hides the interface, then dismisses the countdown, then stops.
                     "back" => {
                         if !self.osd.hide() && !self.player.dismiss() {
                             self.stop_playback();
@@ -425,12 +434,12 @@ impl App {
         }
     }
 
-    /// Met à jour l'état lu par la télécommande, au plus quatre fois par seconde.
+    /// Updates the state read by the remote, at most four times per second.
     fn publish_state(&mut self, ctx: &egui::Context) {
         const INTERVAL: Duration = Duration::from_millis(250);
         let elapsed = self.state_published.elapsed();
         if elapsed < INTERVAL {
-            // Repasser plus tard : sans cela, un changement suivi d'aucun dessin ne serait jamais publié.
+            // Come back later: otherwise a change followed by no redraw would never be published.
             ctx.request_repaint_after(INTERVAL - elapsed);
             return;
         }
@@ -450,7 +459,7 @@ impl App {
         *self.remote_state.lock().unwrap() = state;
     }
 
-    // ---------------------------------------------------------------- écrans
+    // ---------------------------------------------------------------- screens
 
     fn start_login(&mut self, request: login::Request) {
         self.login.busy = true;
@@ -517,7 +526,7 @@ impl App {
         if search && self.menu.is_none() {
             self.search = Some(String::new());
         }
-        // La molette déplace la sélection d'une ligne par cran.
+        // The wheel moves the selection one row per notch.
         self.wheel += wheel;
         if self.wheel.abs() >= 40.0 {
             let direction = if self.wheel > 0.0 { Direction::Up } else { Direction::Down };
@@ -542,7 +551,7 @@ impl App {
                     .inner_margin(egui::Margin::symmetric((rem) as i8, (0.6 * rem) as i8));
                 frame.show(ui, |ui| {
                     let edit = egui::TextEdit::singleline(query)
-                        .hint_text("Rechercher")
+                        .hint_text(t("Search", "Rechercher"))
                         .font(egui::FontId::proportional(1.2 * rem))
                         .text_color(theme::TEXT)
                         .frame(egui::Frame::NONE)
@@ -605,7 +614,7 @@ impl App {
     fn playback(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         playback::paint_video(ui, &self.player.mpv, self.player.is_loading());
-        // Panneau des pistes ouvert : c'est lui qui reçoit le clavier, pas mpv.
+        // Tracks panel open: it gets the keyboard, not mpv.
         if !self.osd.menu_open() {
             let input = playback::forward_input(&ctx, &self.player.mpv);
             if input.activity {
@@ -639,7 +648,7 @@ impl App {
         let painted = self.osd.paint(ui, view, &mut self.images);
         self.raise_subtitles(painted.controls_shown);
         self.apply_osd(painted.actions);
-        // Rafraîchit l'interface et l'état de la télécommande même en pause.
+        // Refreshes the interface and the remote state even while paused.
         if painted.animating {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {
@@ -675,8 +684,8 @@ impl App {
         }
     }
 
-    /// Remonte les sous-titres au-dessus de la barre de progression tant qu'elle est affichée,
-    /// puis rend la position réglée par l'utilisateur (`sub-pos` de son mpv.conf).
+    /// Raises the subtitles above the progress bar while it is shown, then restores the
+    /// user's position (`sub-pos` from their mpv.conf).
     fn raise_subtitles(&mut self, raise: bool) {
         const LIFT: f64 = 12.0;
         let mpv = &self.player.mpv;
@@ -747,10 +756,10 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Enregistre la position en cours, puis libère le rendu tant que le contexte OpenGL existe.
+        // Saves the current position, then frees the renderer while the OpenGL context exists.
         self.player.stop();
         self.player.mpv.free_renderer();
-        // Retire l'annonce Apple TV du réseau.
+        // Withdraws the Apple TV announcement from the network.
         self.apple_tv = None;
     }
 }

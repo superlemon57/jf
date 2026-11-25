@@ -1,5 +1,5 @@
-//! Liaison minimale avec libmpv : le cœur du lecteur et son rendu OpenGL
-//! dans la fenêtre de l'application (pas de fenêtre mpv séparée).
+//! Minimal libmpv binding: the player core and its OpenGL rendering inside the
+//! application window (no separate mpv window).
 
 use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
 use std::path::Path;
@@ -121,7 +121,7 @@ pub enum Event {
         entry: i64,
     },
     FileLoaded,
-    /// Fin naturelle du fichier.
+    /// Natural end of the file.
     Finished {
         entry: i64,
     },
@@ -138,11 +138,11 @@ pub struct Mpv {
     render: *mut MpvRenderContext,
 }
 
-/// Poignée de rendu à passer au callback de peinture d'egui.
+/// Render handle to pass to egui's paint callback.
 #[derive(Clone, Copy)]
 pub struct Renderer(*mut MpvRenderContext);
 
-// Le contexte de rendu n'est utilisé que depuis le fil qui possède le contexte GL.
+// The render context is only used from the thread that owns the GL context.
 unsafe impl Send for Renderer {}
 unsafe impl Sync for Renderer {}
 
@@ -167,25 +167,25 @@ fn error_text(code: c_int) -> String {
 }
 
 impl Mpv {
-    /// À appeler avec le contexte OpenGL de la fenêtre courant.
-    /// `config_dir` reçoit les `mpv.conf`, `input.conf` et `scripts/` de l'utilisateur.
+    /// Call with the window's OpenGL context current.
+    /// `config_dir` holds the user's `mpv.conf`, `input.conf` and `scripts/`.
     pub fn new(cc: &eframe::CreationContext<'_>, config_dir: &Path) -> Result<Self, String> {
-        let loader = cc.get_proc_address.clone().ok_or("le rendu OpenGL n'est pas disponible")?;
+        let loader = cc.get_proc_address.clone().ok_or("OpenGL rendering is not available")?;
         let lookup: ProcAddress = &*loader;
         let handle = unsafe { mpv_create() };
         if handle.is_null() {
-            return Err("impossible de créer le lecteur mpv".into());
+            return Err("could not create the mpv player".into());
         }
         let mut mpv = Self { handle, render: ptr::null_mut() };
 
-        // Valeurs par défaut ; le mpv.conf de l'utilisateur, lu à l'initialisation, les remplace.
+        // Defaults; the user's mpv.conf, read at initialization, overrides them.
         let _ = std::fs::create_dir_all(config_dir);
         let options = [
             ("config-dir", config_dir.to_string_lossy().into_owned()),
             ("config", "yes".into()),
             ("vo", "libmpv".into()),
             ("hwdec", "auto-safe".into()),
-            // jf dessine sa propre interface de lecture.
+            // jf draws its own playback interface.
             ("osc", "no".into()),
             ("osd-bar", "no".into()),
             ("input-default-bindings", "yes".into()),
@@ -199,10 +199,10 @@ impl Mpv {
         }
         let code = unsafe { mpv_initialize(handle) };
         if code < 0 {
-            return Err(format!("initialisation de mpv : {}", error_text(code)));
+            return Err(format!("mpv initialization: {}", error_text(code)));
         }
 
-        // mpv prévient d'un événement ou d'une image à afficher : on réveille l'interface.
+        // mpv signals an event or a frame to show: wake the interface.
         let waker = Box::into_raw(Box::new(cc.egui_ctx.clone())) as *mut c_void;
         unsafe {
             mpv_set_wakeup_callback(handle, wake, waker);
@@ -218,7 +218,7 @@ impl Mpv {
             MpvRenderParam { kind: RENDER_PARAM_API_TYPE, data: api.as_ptr() as *mut c_void },
             MpvRenderParam { kind: RENDER_PARAM_OPENGL_INIT_PARAMS, data: &mut init as *mut _ as *mut c_void },
         ];
-        // Le décodage matériel (VA-API) a besoin de l'affichage natif.
+        // Hardware decoding (VA-API) needs the native display.
         match cc.display_handle().map(|handle| handle.as_raw()) {
             Ok(RawDisplayHandle::Wayland(display)) => {
                 params.push(MpvRenderParam { kind: RENDER_PARAM_WL_DISPLAY, data: display.display.as_ptr() })
@@ -235,7 +235,7 @@ impl Mpv {
         let mut render = ptr::null_mut();
         let code = unsafe { mpv_render_context_create(&mut render, handle, params.as_mut_ptr()) };
         if code < 0 {
-            return Err(format!("rendu mpv : {}", error_text(code)));
+            return Err(format!("mpv renderer: {}", error_text(code)));
         }
         unsafe { mpv_render_context_set_update_callback(render, wake, waker) };
         mpv.render = render;
@@ -246,7 +246,7 @@ impl Mpv {
         Renderer(self.render)
     }
 
-    /// À appeler tant que le contexte OpenGL existe encore.
+    /// Call while the OpenGL context still exists.
     pub fn free_renderer(&mut self) {
         if !self.render.is_null() {
             unsafe { mpv_render_context_free(self.render) };
@@ -299,7 +299,7 @@ impl Mpv {
         self.get::<c_int>(name, FORMAT_FLAG).map(|value| value != 0)
     }
 
-    /// Prochain événement en attente, sans bloquer.
+    /// Next pending event, without blocking.
     pub fn poll_event(&self) -> Option<Event> {
         loop {
             let event = unsafe { &*mpv_wait_event(self.handle, 0.0) };
@@ -336,7 +336,7 @@ impl Mpv {
 }
 
 impl Renderer {
-    /// Dessine l'image courante dans le framebuffer donné (taille en pixels).
+    /// Draws the current frame into the given framebuffer (size in pixels).
     pub fn render(&self, fbo: i32, width: i32, height: i32) {
         let mut target = MpvOpenGlFbo { fbo, w: width, h: height, internal_format: 0 };
         let mut flip: c_int = 1;

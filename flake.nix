@@ -1,5 +1,5 @@
 {
-  description = "jf — client Jellyfin natif pour le salon, avec mpv intégré";
+  description = "jf — lightweight Jellyfin HTPC client";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -12,7 +12,7 @@
       ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # Chargées à l'exécution par winit/glutin (dlopen), donc absentes du RPATH.
+      # Loaded at runtime by winit/glutin (dlopen), so missing from the RPATH.
       runtimeLibs =
         pkgs: with pkgs; [
           libGL
@@ -45,10 +45,10 @@
           ];
           buildInputs = [ pkgs.mpv-unwrapped ];
           postInstall = ''
-            # Pas d'icône propre : le lanceur reprend celle de Jellyfin du thème d'icônes.
+            # No icon of its own: the launcher uses Jellyfin's from the icon theme.
             install -Dm644 assets/jf.desktop $out/share/applications/jf.desktop
           '';
-          # fc-match (polices) et wpctl (volume) : ceux du système passent d'abord s'ils existent.
+          # fc-match (fonts) and wpctl (volume): the system's come first if present.
           postFixup = ''
             patchelf --add-rpath ${pkgs.lib.makeLibraryPath (runtimeLibs pkgs)} $out/bin/jf
             wrapProgram $out/bin/jf --suffix PATH : ${
@@ -59,7 +59,7 @@
             }
           '';
           meta = {
-            description = "Client Jellyfin natif pour le salon, avec mpv intégré";
+            description = "Lightweight Jellyfin HTPC client";
             mainProgram = "jf";
             platforms = systems;
           };

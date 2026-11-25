@@ -1,14 +1,15 @@
-//! Écran de navigation : bandeau d'information, image de fond et grilles de cartes.
+//! Browse screen: information banner, backdrop and grids of cards.
 
 use std::time::Instant;
 
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 use super::theme::{self, Text};
+use crate::i18n::t;
 use crate::images::{ImageRef, Images};
 use crate::jellyfin::{Client, Item};
 
-// Longueurs en rem (voir `theme::rem`).
+// Lengths in rem (see `theme::rem`).
 const GUTTER: f32 = 4.0;
 const INFO_HEIGHT: f32 = 14.0;
 const BACKDROP_HEIGHT: f32 = 24.0;
@@ -74,7 +75,7 @@ pub struct Section {
     pub items: Vec<Item>,
     pub layout: Layout,
     shape: Shape,
-    /// La liste mélange plusieurs séries : les épisodes doivent nommer la leur.
+    /// The list mixes several series: episodes must name theirs.
     pub mixed: bool,
     scroll: f32,
 }
@@ -94,7 +95,7 @@ pub enum Source {
 }
 
 impl Source {
-    /// Requêtes réseau : à appeler hors du fil d'interface.
+    /// Network requests: call them off the interface thread.
     pub fn fetch(&self, client: &Client) -> Result<Vec<Section>, String> {
         let sections = match self {
             Self::Home => {
@@ -105,9 +106,21 @@ impl Source {
                 });
                 let wide = Some(Shape::Wide);
                 vec![
-                    Section::new("Reprendre", resume.unwrap_or_default(), Layout::Row, wide, true),
-                    Section::new("À suivre", next_up.unwrap_or_default(), Layout::Row, wide, true),
-                    Section::new("Bibliothèques", views.map_err(|e| e.to_string())?, Layout::Row, wide, false),
+                    Section::new(
+                        t("Continue watching", "Reprendre"),
+                        resume.unwrap_or_default(),
+                        Layout::Row,
+                        wide,
+                        true,
+                    ),
+                    Section::new(t("Next up", "À suivre"), next_up.unwrap_or_default(), Layout::Row, wide, true),
+                    Section::new(
+                        t("Libraries", "Bibliothèques"),
+                        views.map_err(|e| e.to_string())?,
+                        Layout::Row,
+                        wide,
+                        false,
+                    ),
                 ]
             }
             Self::Children(parent) => {
@@ -120,7 +133,11 @@ impl Source {
             }
             Self::Search(query) => {
                 let items = client.search(query).map_err(|e| e.to_string())?;
-                vec![Section::new(format!("Résultats pour « {query} »"), items, Layout::Grid, None, true)]
+                let title = match crate::i18n::language() {
+                    crate::i18n::Language::English => format!("Results for \u{201c}{query}\u{201d}"),
+                    crate::i18n::Language::French => format!("Résultats pour « {query} »"),
+                };
+                vec![Section::new(title, items, Layout::Grid, None, true)]
             }
         };
         Ok(sections.into_iter().filter(|section| !section.items.is_empty()).collect())
@@ -131,18 +148,18 @@ pub struct Page {
     pub id: u64,
     pub source: Source,
     pub sections: Vec<Section>,
-    /// (section, carte)
+    /// (section, card)
     pub focus: (usize, usize),
     pub loading: bool,
-    /// Les données ont pu changer (lecture, « vu ») depuis le chargement.
+    /// The data may have changed (playback, "watched") since it was loaded.
     pub stale: bool,
     pub error: Option<String>,
     scroll: f32,
-    /// Prochain dessin sans animation de défilement.
+    /// Next frame without scrolling animation.
     snap: bool,
 }
 
-/// Position verticale d'une section dans le contenu, et taille de ses cartes.
+/// Vertical position of a section in the content, and the size of its cards.
 struct Geometry {
     title_y: f32,
     cards_y: f32,
@@ -204,7 +221,7 @@ impl Page {
         self.sections.get_mut(self.focus.0)?.items.get_mut(self.focus.1)
     }
 
-    /// Remplace le contenu en gardant la sélection sur le même élément si possible.
+    /// Replaces the content, keeping the selection on the same item when possible.
     pub fn set_sections(&mut self, mut sections: Vec<Section>) {
         let previous = self.focused().map(|item| item.id.clone());
         for (section, old) in sections.iter_mut().zip(&self.sections) {
@@ -259,14 +276,14 @@ impl Page {
                 self.focus.1 = index - columns;
                 return;
             }
-            // Dernière ligne incomplète : descendre quand même sur sa dernière carte.
+            // Incomplete last row: still move down, onto its last card.
             if down && index / columns < (count - 1) / columns {
                 self.focus.1 = count - 1;
                 return;
             }
         }
 
-        // Sinon passer à la section voisine, sur la carte la plus proche horizontalement.
+        // Otherwise move to the next section, onto the horizontally closest card.
         let target = if down { section_index + 1 } else { section_index.wrapping_sub(1) };
         let Some(next) = self.sections.get(target) else { return };
         let x_of = |section: &Section, geo: &Geometry, index: usize| match section.layout {
@@ -288,14 +305,14 @@ impl Page {
     }
 }
 
-// ------------------------------------------------------------------ contenu des cartes
+// ------------------------------------------------------------------ card content
 
 fn runtime(item: &Item) -> Option<String> {
     let minutes = (item.runtime_seconds() / 60.0) as i64;
     match minutes {
         0 => None,
         1..=59 => Some(format!("{minutes} min")),
-        _ => Some(format!("{} h {:02}", minutes / 60, minutes % 60)),
+        _ => Some(format!("{}{}{:02}", minutes / 60, t("h ", " h "), minutes % 60)),
     }
 }
 
@@ -358,13 +375,13 @@ fn backdrop_image(item: &Item) -> Option<ImageRef> {
     if !item.backdrop_image_tags.is_empty() {
         return reference(&item.id, "Backdrop", 1920, item.backdrop_image_tags.first());
     }
-    // Épisodes et saisons : l'image de la série (le serveur répond 404 si elle n'en a pas).
+    // Episodes and seasons: the series image (the server answers 404 if it has none).
     let parent = item.parent_backdrop_item_id.as_ref().or(item.series_id.as_ref())?;
     reference(parent, "Backdrop", 1920, None)
 }
 
-/// Logo du contenu (titre stylisé sur fond transparent) : celui du film, de la série
-/// pour un épisode, ou l'image d'une chaîne, qui est son logo.
+/// Content logo (styled title on a transparent background): the movie's, the series'
+/// for an episode, or a channel's image, which is its logo.
 pub fn logo(item: &Item) -> Option<ImageRef> {
     if item.is_channel() {
         return reference(&item.id, "Primary", 400, item.image_tags.get("Primary"));
@@ -376,14 +393,14 @@ pub fn logo(item: &Item) -> Option<ImageRef> {
     reference(item.parent_logo_item_id.as_ref()?, "Logo", 600, Some(tag))
 }
 
-/// Vignette 16:9 d'un épisode, pour la carte « Épisode suivant ».
+/// 16:9 thumbnail of an episode, for the "Next episode" card.
 pub fn still(item: &Item) -> Option<ImageRef> {
     thumbnail(item, Shape::Wide)
 }
 
-// ------------------------------------------------------------------ image de fond
+// ------------------------------------------------------------------ backdrop
 
-/// Fond de l'élément sélectionné, avec fondu enchaîné entre deux images.
+/// Backdrop of the selected item, cross-fading between two images.
 #[derive(Default)]
 pub struct Backdrop {
     wanted: Option<ImageRef>,
@@ -393,7 +410,7 @@ pub struct Backdrop {
 }
 
 impl Backdrop {
-    /// Renvoie vrai tant qu'une animation est en cours.
+    /// Returns true while an animation is running.
     fn paint(
         &mut self,
         painter: &egui::Painter,
@@ -410,7 +427,7 @@ impl Backdrop {
         let shown = self.current.as_ref().map(|(image, _)| image);
         let mut animating = false;
         if shown != self.wanted.as_ref() {
-            // Délai : ne rien charger tant que la sélection défile.
+            // Delay: load nothing while the selection is scrolling.
             let settled = self.changed.is_none_or(|at| at.elapsed().as_millis() > 250);
             let ready = self.wanted.as_ref().is_none_or(|image| images.get(image).is_some());
             if settled && ready {
@@ -449,7 +466,7 @@ impl Backdrop {
     }
 }
 
-// ------------------------------------------------------------------ dessin
+// ------------------------------------------------------------------ drawing
 
 pub struct Frame<'a> {
     pub painter: &'a egui::Painter,
@@ -457,27 +474,27 @@ pub struct Frame<'a> {
     pub dt: f32,
     pub images: &'a mut Images,
     pub backdrop: &'a mut Backdrop,
-    /// Position d'un clic à traiter, s'il y en a un.
+    /// Position of a click to handle, if any.
     pub click: Option<Pos2>,
 }
 
 pub struct Painted {
     pub animating: bool,
-    /// Carte cliquée : (section, carte).
+    /// Clicked card: (section, card).
     pub clicked: Option<(usize, usize)>,
 }
 
 fn paint_info(painter: &egui::Painter, screen: Rect, rem: f32, item: &Item) {
     let state = if item.user_data.played {
-        Some("Vu".to_owned())
+        Some(t("Watched", "Vu").to_owned())
     } else if item.resume_seconds() > 0.0 {
-        Some(format!("Reprise à {}", clock(item.resume_seconds())))
+        Some(format!("{} {}", t("Resume from", "Reprise à"), clock(item.resume_seconds())))
     } else {
         None
     };
     let meta: Vec<String> = match item.kind.as_str() {
         "Episode" => vec![item.series_name.clone(), item.episode_code(), runtime(item), state],
-        "TvChannel" => vec![item.channel_number.as_ref().map(|number| format!("Chaîne {number}"))],
+        "TvChannel" => vec![item.channel_number.as_ref().map(|number| format!("{} {number}", t("Channel", "Chaîne")))],
         _ => vec![item.production_year.map(|year| year.to_string()), runtime(item), state],
     }
     .into_iter()
@@ -522,7 +539,7 @@ fn paint_card(painter: &egui::Painter, rem: f32, card: CardView, images: &mut Im
             let appear = (loaded.age / 0.25).min(1.0);
             animating = appear < 1.0;
             if item.is_channel() {
-                // Les logos de chaînes sont montrés entiers, avec une marge.
+                // Channel logos are shown whole, with a margin.
                 theme::image(painter, thumb.shrink(1.2 * rem), loaded.texture, 0.0, alpha * appear, 0.5, true);
             } else {
                 theme::image(painter, thumb, loaded.texture, radius, alpha * appear, 0.5, false);
@@ -539,7 +556,7 @@ fn paint_card(painter: &egui::Painter, rem: f32, card: CardView, images: &mut Im
         }
     }
 
-    // Pastille en haut à droite : coche si vu, sinon nombre d'épisodes restants.
+    // Badge at the top right: a check mark if watched, else the number of episodes left.
     let count = item.user_data.unplayed_item_count.filter(|count| *count > 0 && !item.user_data.played);
     if item.user_data.played || count.is_some() {
         let label = count.map(|count| count.to_string()).unwrap_or_default();
@@ -548,7 +565,7 @@ fn paint_card(painter: &egui::Painter, rem: f32, card: CardView, images: &mut Im
         let pill = Rect::from_min_size(Pos2::new(thumb.right() - 0.4 * rem - size.x, thumb.top() + 0.4 * rem), size);
         painter.rect_filled(pill, theme::corner(size.y / 2.0), Color32::from_black_alpha((190.0 * alpha) as u8));
         if item.user_data.played {
-            // Coche tracée à la main : toutes les polices n'ont pas ce symbole.
+            // Check mark drawn by hand: not every font has this symbol.
             let unit = 0.14 * rem;
             let points = [(-2.2, 0.1), (-0.7, 1.6), (2.3, -1.7)].map(|(x, y)| pill.center() + Vec2::new(x, y) * unit);
             painter.line(points.to_vec(), Stroke::new(0.12 * rem, fade(theme::TEXT)));
@@ -559,7 +576,7 @@ fn paint_card(painter: &egui::Painter, rem: f32, card: CardView, images: &mut Im
 
     let (position, total) = (item.user_data.playback_position_ticks, item.run_time_ticks.unwrap_or(0));
     if !item.user_data.played && position > 0 && total > 0 {
-        // La barre est la vignette elle-même, découpée à sa hauteur : elle épouse ainsi son arrondi.
+        // The bar is the thumbnail itself, clipped to its height, so it follows its rounded corners.
         let width = thumb.width() * (position as f32 / total as f32).clamp(0.0, 1.0);
         let bar = Rect::from_min_max(
             Pos2::new(thumb.left(), thumb.bottom() - 0.25 * rem),
@@ -603,8 +620,8 @@ impl Page {
         if self.sections.is_empty() {
             let message = match (&self.error, self.loading) {
                 (Some(error), _) => error.as_str(),
-                (None, true) => "Chargement…",
-                (None, false) => "Rien à afficher.",
+                (None, true) => t("Loading…", "Chargement…"),
+                (None, false) => t("Nothing to show.", "Rien à afficher."),
             };
             Text::line(message, rem, theme::DIM, screen.width() * 0.8)
                 .paint(painter, Pos2::new(left, content.top() + 2.0 * rem));
@@ -623,7 +640,7 @@ impl Page {
             }
         };
 
-        // Garde la carte sélectionnée au centre, verticalement puis dans sa rangée.
+        // Keeps the selected card centered, vertically and then within its row.
         let (focus_section, focus_index) = self.focus;
         if let (Some(section), Some(geo)) = (self.sections.get_mut(focus_section), geometries.get(focus_section)) {
             let pitch = geo.pitch(rem);
@@ -649,7 +666,7 @@ impl Page {
                 Text::line(&section.title, 1.05 * rem, theme::DIM, width).paint(&clipped, title);
             }
 
-            // Seules les cartes visibles sont dessinées.
+            // Only visible cards are drawn.
             let visible = match section.layout {
                 Layout::Row => {
                     let first = ((section.scroll - GUTTER * rem) / pitch.x).floor().max(0.0) as usize;
@@ -676,7 +693,7 @@ impl Page {
                 if !rect.intersects(content) {
                     continue;
                 }
-                // Les cartes qui passent sous le bandeau s'estompent au lieu d'être coupées net.
+                // Cards passing under the banner fade out instead of being cut off.
                 let alpha = ((rect.bottom() - content.top()) / rect.height()).clamp(0.0, 1.0).powi(2);
                 let card = CardView {
                     item: &section.items[index],

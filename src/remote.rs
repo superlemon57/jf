@@ -1,5 +1,5 @@
-//! Ce que partagent jf et la télécommande Apple TV d'iOS (`atv`) : l'état de la lecture
-//! publié par l'interface, les commandes reçues, et le volume du système.
+//! What jf shares with the iOS Apple TV remote (`atv`): the playback state published by
+//! the interface, the commands received, and the system volume.
 
 use std::process::Command as Process;
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,7 @@ use crate::player::{Track, TrackKind};
 
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 
-/// État de la lecture, mis à jour par l'interface quatre fois par seconde.
+/// Playback state, updated by the interface four times per second.
 #[derive(Clone, Default)]
 pub struct State {
     pub playing: bool,
@@ -21,31 +21,42 @@ pub struct State {
 
 pub type Shared = Arc<Mutex<State>>;
 
-/// Commande reçue de la télécommande, exécutée par le fil d'interface.
+/// Command received from the remote, run on the interface thread.
 pub enum Command {
-    /// Touche de navigation ou de lecture : `up`, `ok`, `back`, `home`, `menu`, `playpause`…
+    /// Navigation or playback key: `up`, `ok`, `back`, `home`, `menu`, `playpause`…
     Key(String),
     SeekBy(f64),
     Track(TrackKind, Option<i64>),
 }
 
-/// Règle le volume du système via PipeWire et renvoie le nouveau niveau (0 à 1).
+// System volume through PipeWire (`wpctl`) on Linux. Elsewhere the remote's volume
+// buttons do nothing: the system and the TV keep their own controls.
+
+/// Changes the system volume and returns the new level (0 to 1).
 pub(crate) fn change_volume(delta: f64) -> Option<f64> {
     let step = format!("{:.0}%{}", delta.abs().min(0.5) * 100.0, if delta < 0.0 { '-' } else { '+' });
-    Process::new("wpctl").args(["set-volume", "--limit", "1.0", SINK, &step]).status().ok()?;
+    wpctl(&["set-volume", "--limit", "1.0", SINK, &step])?;
     volume()
 }
 
-/// Volume du système, de 0 à 1.
+/// System volume, from 0 to 1.
 pub(crate) fn volume() -> Option<f64> {
-    let output = Process::new("wpctl").args(["get-volume", SINK]).output().ok()?;
+    let output = wpctl(&["get-volume", SINK])?;
     String::from_utf8_lossy(&output.stdout).split_whitespace().nth(1)?.parse().ok()
 }
 
 pub(crate) fn set_volume(volume: f64) {
-    let _ = Process::new("wpctl").args(["set-volume", "--limit", "1.0", SINK, &format!("{volume:.3}")]).status();
+    wpctl(&["set-volume", "--limit", "1.0", SINK, &format!("{volume:.3}")]);
 }
 
 pub(crate) fn toggle_mute() {
-    let _ = Process::new("wpctl").args(["set-mute", SINK, "toggle"]).status();
+    wpctl(&["set-mute", SINK, "toggle"]);
+}
+
+fn wpctl(arguments: &[&str]) -> Option<std::process::Output> {
+    if cfg!(target_os = "linux") {
+        Process::new("wpctl").args(arguments).output().ok().filter(|output| output.status.success())
+    } else {
+        None
+    }
 }

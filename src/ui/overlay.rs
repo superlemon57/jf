@@ -1,8 +1,9 @@
-//! Éléments affichés par-dessus la navigation : menu d'options et messages.
+//! Elements drawn over the browser: options menu and messages.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 
 use super::theme::{self, Text};
+use crate::i18n::t;
 use crate::jellyfin::Item;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -14,7 +15,7 @@ pub enum Action {
     TogglePlayed,
 }
 
-/// Options proposées pour l'élément sélectionné.
+/// Options offered for the selected item.
 pub struct Menu {
     pub item: Item,
     entries: Vec<(String, Action)>,
@@ -24,23 +25,30 @@ pub struct Menu {
 impl Menu {
     pub fn new(item: &Item) -> Self {
         let mut entries = Vec::new();
-        let played = if item.user_data.played { "Marquer comme non vu" } else { "Marquer comme vu" };
+        let played = if item.user_data.played {
+            t("Mark as unwatched", "Marquer comme non vu")
+        } else {
+            t("Mark as watched", "Marquer comme vu")
+        };
         if item.is_channel() {
-            entries.push(("Regarder".to_owned(), Action::Play));
+            entries.push((t("Watch", "Regarder").to_owned(), Action::Play));
         } else if item.is_playable() {
             let resume = item.resume_seconds();
             if resume > 0.0 {
-                entries.push((format!("Reprendre à {}", super::browse::clock(resume)), Action::Play));
-                entries.push(("Lire depuis le début".to_owned(), Action::Restart));
+                entries.push((
+                    format!("{} {}", t("Resume from", "Reprendre à"), super::browse::clock(resume)),
+                    Action::Play,
+                ));
+                entries.push((t("Play from the start", "Lire depuis le début").to_owned(), Action::Restart));
             } else {
-                entries.push(("Lire".to_owned(), Action::Play));
+                entries.push((t("Play", "Lire").to_owned(), Action::Play));
             }
             entries.push((played.to_owned(), Action::TogglePlayed));
         } else {
-            entries.push(("Ouvrir".to_owned(), Action::Open));
+            entries.push((t("Open", "Ouvrir").to_owned(), Action::Open));
             let library = matches!(item.kind.as_str(), "CollectionFolder" | "UserView");
             if item.collection_type.as_deref() != Some("livetv") {
-                entries.push(("Lecture aléatoire".to_owned(), Action::Shuffle));
+                entries.push((t("Shuffle", "Lecture aléatoire").to_owned(), Action::Shuffle));
             }
             if !library {
                 entries.push((played.to_owned(), Action::TogglePlayed));
@@ -58,7 +66,7 @@ impl Menu {
         self.entries[self.focus].1
     }
 
-    /// Dessine le menu ; renvoie l'entrée cliquée s'il y en a une.
+    /// Draws the menu; returns the clicked entry, if any.
     pub fn paint(&mut self, painter: &egui::Painter, screen: Rect, click: Option<Pos2>) -> Option<Action> {
         let rem = theme::rem(screen);
         painter.rect_filled(screen, 0.0, Color32::from_black_alpha(170));
@@ -96,7 +104,7 @@ impl Menu {
     }
 }
 
-/// Code à saisir sur l'iPhone pour l'appairer comme télécommande.
+/// Code to enter on the iPhone to pair it as a remote.
 pub fn pairing_code(ctx: &egui::Context, code: u32) {
     let screen = ctx.content_rect();
     let rem = theme::rem(screen);
@@ -106,9 +114,14 @@ pub fn pairing_code(ctx: &egui::Context, code: u32) {
     let panel = Rect::from_center_size(screen.center(), Vec2::new(26.0, 15.0) * rem);
     painter.rect_filled(panel, theme::corner(0.6 * rem), theme::PANEL);
     let lines = [
-        ("Jumelage de la télécommande", rem, theme::DIM, egui::FontFamily::Proportional),
+        (t("Pair the remote", "Jumelage de la télécommande"), rem, theme::DIM, egui::FontFamily::Proportional),
         (&*format!("{code:04}"), 4.0 * rem, theme::TEXT, theme::semibold()),
-        ("Saisissez ce code sur l'iPhone.", rem, theme::DIM, egui::FontFamily::Proportional),
+        (
+            t("Enter this code on the iPhone.", "Saisissez ce code sur l'iPhone."),
+            rem,
+            theme::DIM,
+            egui::FontFamily::Proportional,
+        ),
     ];
     let mut y = panel.top() + 2.0 * rem;
     for (text, size, color, family) in lines {
@@ -117,7 +130,7 @@ pub fn pairing_code(ctx: &egui::Context, code: u32) {
     }
 }
 
-/// Message bref en bas de l'écran.
+/// Short message at the bottom of the screen.
 pub fn toast(ctx: &egui::Context, message: &str) {
     let screen = ctx.content_rect();
     let rem = theme::rem(screen);

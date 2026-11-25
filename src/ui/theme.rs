@@ -1,4 +1,4 @@
-//! Couleurs, polices et primitives de dessin partagées par les écrans.
+//! Colors, fonts and drawing primitives shared by the screens.
 
 use std::process::Command;
 use std::sync::Arc;
@@ -11,8 +11,8 @@ pub const DIM: Color32 = Color32::from_rgb(152, 152, 157);
 pub const CARD: Color32 = Color32::from_rgb(27, 27, 30);
 pub const PANEL: Color32 = Color32::from_rgb(20, 20, 22);
 
-/// Unité de longueur de l'interface : tout grossit avec la largeur de la fenêtre,
-/// pour rester lisible depuis le canapé.
+/// Length unit of the interface: everything grows with the window width, to stay
+/// readable from the couch.
 pub fn rem(screen: Rect) -> f32 {
     (screen.width() * 0.0115).clamp(13.0, 32.0).round()
 }
@@ -25,26 +25,42 @@ fn background(alpha: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(BACKGROUND.r(), BACKGROUND.g(), BACKGROUND.b(), (alpha * 255.0) as u8)
 }
 
-/// Fichier et index de face choisis par fontconfig pour un motif donné.
+/// Font file and face index for a pattern: fontconfig's choice, or the usual system
+/// font on macOS and Windows.
 fn system_font(pattern: &str) -> Option<(String, u32)> {
+    fontconfig(pattern).or_else(|| known_font(pattern))
+}
+
+fn fontconfig(pattern: &str) -> Option<(String, u32)> {
     let output = Command::new("fc-match").args(["--format", "%{file}\n%{index}", pattern]).output().ok()?;
     let text = String::from_utf8(output.stdout).ok()?;
     let (file, index) = text.split_once('\n')?;
     Some((file.to_owned(), index.trim().parse().ok()?))
 }
 
-/// Utilise la police sans empattement du système (réglages fontconfig de l'utilisateur),
-/// en gardant celles d'egui en secours pour les symboles.
+fn known_font(pattern: &str) -> Option<(String, u32)> {
+    let candidates: &[&str] = match (cfg!(target_os = "macos"), pattern) {
+        (true, "sans-serif" | "sans-serif:semibold") => &["/System/Library/Fonts/SFNS.ttf"],
+        (true, _) => &["/System/Library/Fonts/Hiragino Sans GB.ttc"],
+        (false, "sans-serif") => &["C:\\Windows\\Fonts\\segoeui.ttf"],
+        (false, "sans-serif:semibold") => &["C:\\Windows\\Fonts\\seguisb.ttf"],
+        (false, _) => &["C:\\Windows\\Fonts\\YuGothM.ttc", "C:\\Windows\\Fonts\\msgothic.ttc"],
+    };
+    candidates.iter().find(|path| std::path::Path::new(path).exists()).map(|path| (path.to_string(), 0))
+}
+
+/// Uses the system sans-serif font (the user's fontconfig settings on Linux), keeping
+/// egui's fonts as a fallback for symbols.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    // Les 16 bits hauts de l'index désignent une instance de police variable : seule la face compte ici.
+    // The high 16 bits of the index name a variable font instance: only the face matters here.
     let face = |pattern: &str| system_font(pattern).map(|(file, index)| (file, index & 0xffff));
     let mut load = |key: &str, face: &(String, u32), weight: Option<f32>| -> bool {
         let Ok(data) = std::fs::read(&face.0) else { return false };
         let mut font = egui::FontData::from_owned(data);
         font.index = face.1;
         if let Some(weight) = weight {
-            // Pour une police variable, c'est ce réglage qui donne la graisse ; une police fixe l'ignore.
+            // A variable font takes its weight from this setting; a static font ignores it.
             font.tweak.coords = egui::epaint::text::VariationCoords::new([(b"wght", weight)]);
         }
         fonts.font_data.insert(key.to_owned(), Arc::new(font));
@@ -53,7 +69,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     let body = face("sans-serif");
     let regular = body.as_ref().is_some_and(|face| load("regular", face, None));
     let bold = face("sans-serif:semibold").is_some_and(|face| load("semibold", &face, Some(600.0)));
-    // Sans police japonaise installée, fontconfig renvoie la police de base : inutile de la recharger.
+    // Without a Japanese font installed, fontconfig returns the base font: no need to load it twice.
     let cjk = face("sans-serif:lang=ja")
         .filter(|face| Some(face) != body.as_ref())
         .is_some_and(|face| load("cjk", &face, None));
@@ -83,13 +99,13 @@ pub struct Text<'a> {
     pub family: FontFamily,
     pub max_width: f32,
     pub max_rows: usize,
-    /// Interligne en multiple de la taille.
+    /// Line height as a multiple of the size.
     pub leading: f32,
     pub centered: bool,
 }
 
 impl<'a> Text<'a> {
-    /// Une ligne, coupée par « … » si elle dépasse.
+    /// One line, cut with "…" if it is too long.
     pub fn line(text: &'a str, size: f32, color: Color32, max_width: f32) -> Self {
         Self {
             text,
@@ -114,7 +130,7 @@ impl<'a> Text<'a> {
         job.wrap = egui::text::TextWrapping {
             max_width: self.max_width,
             max_rows: self.max_rows,
-            // Une ligne seule est coupée au caractère près, un paragraphe entre les mots.
+            // A single line is cut at any character, a paragraph between words.
             break_anywhere: self.max_rows == 1,
             overflow_character: Some('…'),
         };
@@ -124,7 +140,7 @@ impl<'a> Text<'a> {
         painter.layout_job(job)
     }
 
-    /// Dessine le texte et renvoie sa hauteur. Centré, `position` désigne le milieu du haut.
+    /// Draws the text and returns its height. When centered, `position` is the top middle.
     pub fn paint(&self, painter: &egui::Painter, position: Pos2) -> f32 {
         let galley = self.layout(painter);
         let height = galley.size().y;
@@ -137,8 +153,8 @@ pub fn corner(radius: f32) -> egui::CornerRadius {
     egui::CornerRadius::same(radius.round().clamp(0.0, 255.0) as u8)
 }
 
-/// Image recadrée pour remplir `rect` (`anchor` : 0 garde le haut, 0.5 centre),
-/// ou entière et centrée si `contain`.
+/// Image cropped to fill `rect` (`anchor`: 0 keeps the top, 0.5 centers), or whole and
+/// centered if `contain`.
 pub fn image(
     painter: &egui::Painter,
     rect: Rect,
@@ -165,8 +181,8 @@ pub fn image(
     painter.add(epaint::RectShape::filled(target, corner(radius), tint).with_texture(texture.id(), uv));
 }
 
-/// Dégradé du fond de l'application vers la transparence.
-/// `stops` : (position de 0 à 1 le long de l'axe, opacité du fond).
+/// Gradient from the application background to transparency.
+/// `stops`: (position from 0 to 1 along the axis, background opacity).
 pub fn fade(painter: &egui::Painter, rect: Rect, horizontal: bool, stops: &[(f32, f32)]) {
     let mut mesh = egui::Mesh::default();
     for (index, (position, alpha)) in stops.iter().enumerate() {

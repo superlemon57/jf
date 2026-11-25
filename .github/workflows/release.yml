@@ -1,0 +1,154 @@
+name: Release
+
+# Builds jf for Linux, Windows and macOS when a version tag (v1.2.3) is pushed, and
+# attaches the archives to the GitHub release of that tag.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libmpv-dev
+      - run: cargo build --release
+      - name: Package
+        run: |
+          name=jf-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}
+          mkdir -p "$name"
+          cp target/release/jf assets/jf.desktop README.md "$name/"
+          cp -r LICENSES "$name/"
+          tar czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: jf-*.tar.gz
+
+  windows:
+    strategy:
+      matrix:
+        include:
+          - runner: windows-latest
+            arch: x86_64
+            msvc: x64
+            mpv: mpv-dev-x86_64-2*.7z
+          - runner: windows-11-arm
+            arch: aarch64
+            msvc: arm64
+            mpv: mpv-dev-aarch64-*.7z
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc }}
+      - name: libmpv
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Latest libmpv build from shinchiro/mpv-winbuild-cmake.
+          $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } `
+            https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest
+          $asset = $release.assets | Where-Object { $_.name -like "${{ matrix.mpv }}" } | Select-Object -First 1
+          Invoke-WebRequest $asset.browser_download_url -OutFile mpv.7z
+          7z x mpv.7z -ompv
+          # Import library for the MSVC linker, built from the DLL's exports.
+          $exports = dumpbin /exports mpv\libmpv-2.dll |
+            Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(mpv_\w+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          "LIBRARY libmpv-2.dll`nEXPORTS`n" + ($exports -join "`n") | Set-Content mpv\mpv.def
+          lib /def:mpv\mpv.def /out:mpv\mpv.lib /machine:${{ matrix.msvc }}
+          "RUSTFLAGS=-L native=$pwd\mpv" | Out-File -Append $env:GITHUB_ENV
+      - run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "jf-$env:GITHUB_REF_NAME-windows-${{ matrix.arch }}"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target\release\jf.exe, mpv\libmpv-2.dll, README.md $name
+          Copy-Item -Recurse LICENSES $name
+          Compress-Archive $name "$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: jf-*.zip
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: brew install mpv dylibbundler
+      - run: cargo build --release
+        env:
+          RUSTFLAGS: -L native=/opt/homebrew/lib -L native=/usr/local/lib
+      - name: Package
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          app=jf.app/Contents
+          mkdir -p "$app/MacOS" "$app/libs"
+          cp target/release/jf "$app/MacOS/"
+          cat > "$app/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>jf</string>
+            <key>CFBundleIdentifier</key><string>io.github.superlemon57.jf</string>
+            <key>CFBundleExecutable</key><string>jf</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${version}</string>
+            <key>CFBundleVersion</key><string>${version}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+            <key>NSLocalNetworkUsageDescription</key><string>jf appears as an Apple TV to the iPhone remote.</string>
+            <key>NSBonjourServices</key><array><string>_companion-link._tcp</string></array>
+          </dict>
+          </plist>
+          EOF
+          # libmpv and its dependencies go inside the app, which is then signed ad hoc.
+          dylibbundler -od -b -x "$app/MacOS/jf" -d "$app/libs" -p @executable_path/../libs/
+          codesign --force --deep --sign - jf.app
+          name=jf-${GITHUB_REF_NAME}-macos-${{ matrix.arch }}
+          ditto -c -k --keepParent jf.app "$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: jf-*.zip
+
+  publish:
+    needs: [linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            jf-*.tar.gz
+            jf-*.zip

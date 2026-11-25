@@ -1,6 +1,6 @@
-//! Écran de lecture : la vidéo de mpv remplit la fenêtre et le clavier lui est transmis
-//! (ses raccourcis et l'`input.conf` de l'utilisateur s'appliquent). La souris est
-//! gérée par l'interface de lecture de jf (`osd`).
+//! Playback screen: mpv's video fills the window and the keyboard is passed to it (its
+//! shortcuts and the user's `input.conf` apply). The mouse drives jf's playback
+//! interface (`osd`).
 
 use std::sync::Arc;
 
@@ -8,18 +8,19 @@ use eframe::egui::{self, Event, Key, Modifiers};
 use eframe::glow::{self, HasContext};
 
 use super::theme::{self, Text};
+use crate::i18n::t;
 use crate::mpv::Mpv;
 
-/// Touches que jf garde pour lui au lieu de les passer à mpv.
+/// Keys jf keeps for itself instead of passing them to mpv.
 #[derive(Default)]
 pub struct Input {
-    /// Échap, Retour arrière ou q : écarter le compte à rebours, sinon arrêter.
+    /// Escape, Backspace or q: dismiss the countdown, else stop.
     pub back: bool,
-    /// Entrée : valider la proposition affichée, sinon pause.
+    /// Enter: accept the prompt on screen, else pause.
     pub ok: bool,
-    /// Une touche a été pressée : l'interface de lecture se montre.
+    /// A key was pressed: the playback interface shows.
     pub activity: bool,
-    /// `c` : panneau « Sous-titres et audio ».
+    /// `c`: "Subtitles and audio" panel.
     pub tracks: bool,
 }
 
@@ -35,12 +36,15 @@ pub fn paint_video(ui: &egui::Ui, mpv: &Mpv, loading: bool) {
     ui.painter().add(egui::PaintCallback { rect, callback: Arc::new(callback) });
     if loading {
         let rem = theme::rem(rect);
-        let text = Text { centered: true, ..Text::line("Chargement…", 1.2 * rem, theme::DIM, rect.width()) };
+        let text = Text {
+            centered: true,
+            ..Text::line(t("Loading…", "Chargement…"), 1.2 * rem, theme::DIM, rect.width())
+        };
         text.paint(ui.painter(), rect.center());
     }
 }
 
-/// Nom mpv d'une touche sans caractère imprimable.
+/// mpv name of a key without a printable character.
 fn special(key: Key) -> Option<&'static str> {
     Some(match key {
         Key::ArrowLeft => "LEFT",
@@ -98,7 +102,7 @@ pub fn forward_input(ctx: &egui::Context, mpv: &Mpv) -> Input {
                 if let Some(name) = special(key) {
                     press(&with_modifiers(modifiers, name));
                 } else if modifiers.ctrl || modifiers.alt {
-                    // Sans Ctrl ni Alt, les caractères arrivent par `Event::Text`.
+                    // Without Ctrl or Alt, characters arrive as `Event::Text`.
                     let plain = Modifiers { shift: false, ..modifiers };
                     press(&with_modifiers(plain, &key.name().to_lowercase()));
                 }

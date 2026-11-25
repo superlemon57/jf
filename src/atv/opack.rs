@@ -147,8 +147,8 @@ pub fn pack(data: &Value) -> Vec<u8> {
     pack_inner(data)
 }
 
-/// Sans références arrière : chaque valeur est écrite en entier, ce qui reste valide pour
-/// iOS quelle que soit la façon dont son décodeur numérote les objets (conteneurs compris).
+/// No back-references: every value is written in full, which stays valid for iOS however
+/// its decoder numbers objects (containers included).
 fn pack_inner(data: &Value) -> Vec<u8> {
     match data {
         Value::Null => vec![0x04],
@@ -466,9 +466,9 @@ fn unpack_inner<'a>(
         m => return Err(err(&format!("unknown OPACK marker {m:#x}"))),
     };
 
-    // Comme l'encodeur d'Apple, on ne référence pas les objets d'un seul octet (chaîne ou
-    // données vides) : iOS envoie `"myriadTrialTreatment": ""` dans `_systemInfo`, et les
-    // compter décalait toutes les références suivantes (le nom du message devenait illisible).
+    // Like Apple's encoder, one-byte objects (empty string or data) are not referenced:
+    // iOS sends `"myriadTrialTreatment": ""` in `_systemInfo`, and counting them shifted
+    // every later reference (the message name became unreadable).
     let encoded = data.len() - remaining.len();
     if add_ref && encoded > 1 && !objects.contains(&value) {
         spend(budget, std::mem::size_of::<Value>() + allocated(&value))?;
@@ -494,8 +494,8 @@ fn spend(budget: &mut usize, amount: usize) -> Result<(), OpackError> {
 mod tests {
     use super::*;
 
-    /// Une chaîne vide avant une référence ne doit pas la décaler (bug vu avec iOS) :
-    /// message encodé comme le fait iOS, la seconde « _systemInfo » étant une référence.
+    /// An empty string before a reference must not shift it (bug seen with iOS): a message
+    /// encoded the way iOS does, the second "_systemInfo" being a reference.
     #[test]
     fn empty_string_does_not_shift_references() {
         let mut packed = vec![0xE3, 0x40 + 20];
@@ -509,7 +509,7 @@ mod tests {
         assert_eq!(decoded.get("copie").and_then(Value::as_str), Some("_systemInfo"));
     }
 
-    /// L'encodeur écrit chaque valeur en entier, même répétée.
+    /// The encoder writes every value in full, even when repeated.
     #[test]
     fn pack_writes_repeated_values_in_full() {
         let message = Value::dict(vec![

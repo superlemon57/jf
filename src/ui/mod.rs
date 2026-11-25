@@ -1,4 +1,4 @@
-//! Écrans de l'application.
+//! Application screens.
 
 pub mod browse;
 pub mod login;

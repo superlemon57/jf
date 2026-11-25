@@ -1,8 +1,10 @@
 [Desktop Entry]
 Type=Application
 Name=jf
-GenericName=Client Jellyfin
-Comment=Client Jellyfin natif pour le salon, avec mpv intégré
+GenericName=Jellyfin client
+GenericName[fr]=Client Jellyfin
+Comment=Lightweight Jellyfin HTPC client
+Comment[fr]=Client Jellyfin léger pour le salon
 Exec=jf
 Icon=jellyfin
 Terminal=false
