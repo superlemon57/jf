@@ -15,6 +15,7 @@ num-traits = "0.2"
 plist = "1"
 rand = "0.8"
 sha2 = "0.10"
+socket2 = { version = "0.5", features = ["all"] }
 subtle = "2"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "default_fonts"] }

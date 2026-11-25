@@ -12,12 +12,13 @@ mod session;
 mod srp;
 mod tlv;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, UdpSocket};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -39,7 +40,7 @@ const PAIRING_WINDOW: Duration = Duration::from_secs(120);
 const PAIRING_ATTEMPTS: u8 = 3;
 /// Délai avant une nouvelle fenêtre après un code faux, contre la recherche systématique.
 const PAIRING_COOLDOWN: Duration = Duration::from_secs(30);
-const MAX_CONNECTIONS: usize = 8;
+const MAX_CONNECTIONS: usize = 32;
 
 /// Journal du protocole sur la sortie d'erreur, activé par `JF_LOG=1`.
 fn logging() -> bool {
@@ -47,10 +48,16 @@ fn logging() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("JF_LOG").is_some_and(|value| value != "0"))
 }
 
+/// Secondes écoulées depuis le premier message du journal.
+fn clock() -> f64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
 macro_rules! trace {
     ($($argument:tt)*) => {
         if $crate::atv::logging() {
-            eprintln!("[apple-tv] {}", format!($($argument)*));
+            eprintln!("[apple-tv {:9.3}] {}", $crate::atv::clock(), format!($($argument)*));
         }
     };
 }
@@ -86,6 +93,10 @@ pub struct Shared {
     pairing: Mutex<PairingState>,
     /// Message à afficher par l'interface (« iPhone jumelé »).
     notice: Mutex<Option<String>>,
+    /// Connexion active de chaque iPhone, par identifiant : une nouvelle télécommande
+    /// ouverte par le même iPhone remplace l'ancienne connexion.
+    remotes: Mutex<HashMap<Vec<u8>, u64>>,
+    connections: AtomicU64,
     pub(crate) state: remote::Shared,
     commands: Sender<remote::Command>,
     ui: egui::Context,
@@ -254,6 +265,8 @@ pub fn start(
         companion_port: ports[1],
         pairing: Mutex::default(),
         notice: Mutex::default(),
+        remotes: Mutex::default(),
+        connections: AtomicU64::new(0),
         state,
         commands,
         ui,

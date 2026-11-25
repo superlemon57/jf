@@ -14,6 +14,8 @@ use crate::player::{Prompt, Track, TrackKind, COUNTDOWN};
 
 /// Délai sans activité avant que l'interface ne s'efface.
 const IDLE: Duration = Duration::from_secs(3);
+/// Délai plus long quand on navigue à la télécommande, le temps de viser le bouton suivant.
+const REMOTE_IDLE: Duration = Duration::from_secs(6);
 // Longueurs en rem (voir `theme::rem`).
 const GUTTER: f32 = 3.0;
 const BAR_FROM_BOTTOM: f32 = 4.2;
@@ -75,6 +77,21 @@ pub struct Osd {
     menu: Option<Focus>,
     /// Touches de télécommande reçues pour le panneau, traitées à la prochaine image.
     remote_keys: Vec<&'static str>,
+    /// Élément sélectionné à la télécommande (flèches), absent tant qu'elle n'a pas servi.
+    focus: Option<Target>,
+    /// Ce que montrait la dernière image, pour interpréter les touches de télécommande.
+    seen: Seen,
+    /// Dernier mouvement de la souris : un pointeur immobile ne surligne rien.
+    pointer_moved: Instant,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Seen {
+    shown: bool,
+    paused: bool,
+    live: bool,
+    /// Proposition à l'écran : `Some(true)` pour « Épisode suivant », `Some(false)` pour un passage à sauter.
+    prompt: Option<bool>,
 }
 
 /// Position dans le panneau des pistes : colonne 0 pour l'audio, 1 pour les sous-titres.
@@ -111,7 +128,17 @@ struct Layout {
 
 impl Default for Osd {
     fn default() -> Self {
-        Self { activity: Instant::now(), alpha: 1.0, scrub: None, pressed: None, menu: None, remote_keys: Vec::new() }
+        Self {
+            activity: Instant::now(),
+            alpha: 1.0,
+            scrub: None,
+            pressed: None,
+            menu: None,
+            remote_keys: Vec::new(),
+            focus: None,
+            seen: Seen::default(),
+            pointer_moved: Instant::now(),
+        }
     }
 }
 
@@ -139,6 +166,102 @@ impl Osd {
         };
         self.remote_keys.push(key);
         self.poke();
+    }
+
+    /// Lignes de l'interface parcourues aux flèches, de haut en bas.
+    fn rows(&self) -> Vec<Vec<Target>> {
+        let seen = self.seen;
+        let mut rows = vec![vec![Target::Tracks]];
+        rows.push(if seen.live {
+            vec![Target::PlayPause]
+        } else {
+            vec![Target::Back, Target::PlayPause, Target::Forward]
+        });
+        match seen.prompt {
+            Some(true) => rows.push(vec![Target::Accept, Target::Dismiss]),
+            Some(false) => rows.push(vec![Target::Accept]),
+            None => {}
+        }
+        if !seen.live {
+            rows.push(vec![Target::Bar]);
+        }
+        rows
+    }
+
+    /// Touche de télécommande pendant la lecture (flèches et validation).
+    /// Interface masquée : gauche/droite reculent ou avancent de 10 s, valider met en
+    /// pause (ou valide la proposition affichée), haut/bas montrent l'interface.
+    /// Interface affichée : les flèches déplacent la sélection, valider l'active.
+    pub fn remote(&mut self, key: &str) -> Vec<Action> {
+        let seen = self.seen;
+        self.poke();
+        // La sélection de la télécommande prend le pas sur le survol de la souris.
+        self.pointer_moved = Instant::now().checked_sub(IDLE).unwrap_or(self.pointer_moved);
+        let default = if seen.prompt.is_some() { Target::Accept } else { Target::PlayPause };
+        let Some(focus) = self.focus.filter(|_| seen.shown) else {
+            return match key {
+                "left" | "right" if !seen.live => {
+                    self.focus = Some(Target::Bar);
+                    vec![Action::SeekBy(if key == "left" { -SEEK_STEP } else { SEEK_STEP })]
+                }
+                "ok" => {
+                    self.focus = Some(default);
+                    vec![if seen.prompt.is_some() { Action::Accept } else { Action::TogglePause }]
+                }
+                _ => {
+                    self.focus = Some(default);
+                    Vec::new()
+                }
+            };
+        };
+        let rows = self.rows();
+        let (row, column) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(row, targets)| Some((row, targets.iter().position(|target| *target == focus)?)))
+            .unwrap_or((1, 0));
+        match key {
+            "up" | "down" => {
+                let next = if key == "up" { row.saturating_sub(1) } else { (row + 1).min(rows.len() - 1) };
+                let targets = &rows[next];
+                // D'une ligne d'un seul bouton vers la ligne centrale : on arrive sur lecture/pause.
+                let column = if rows[row].len() == 1 && targets.len() == 3 { 1 } else { column.min(targets.len() - 1) };
+                self.focus = Some(targets[column]);
+                Vec::new()
+            }
+            "left" | "right" if focus == Target::Bar => {
+                vec![Action::SeekBy(if key == "left" { -SEEK_STEP } else { SEEK_STEP })]
+            }
+            "left" | "right" => {
+                let targets = &rows[row];
+                let column = if key == "left" { column.saturating_sub(1) } else { (column + 1).min(targets.len() - 1) };
+                self.focus = Some(targets[column]);
+                Vec::new()
+            }
+            "ok" => match focus {
+                Target::Tracks => {
+                    self.open_menu();
+                    Vec::new()
+                }
+                Target::Back => vec![Action::SeekBy(-SEEK_STEP)],
+                Target::Forward => vec![Action::SeekBy(SEEK_STEP)],
+                Target::Accept => vec![Action::Accept],
+                Target::Dismiss => vec![Action::Dismiss],
+                _ => vec![Action::TogglePause],
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// Masque l'interface si elle est affichée (touche retour) ; renvoie faux sinon,
+    /// ou en pause, où elle reste affichée.
+    pub fn hide(&mut self) -> bool {
+        if !self.seen.shown || self.seen.paused {
+            return false;
+        }
+        self.activity = Instant::now().checked_sub(REMOTE_IDLE).unwrap_or(self.activity);
+        self.focus = None;
+        true
     }
 
     /// Ouvre le panneau des pistes ; la sélection se placera sur les sous-titres actifs.
@@ -193,18 +316,40 @@ impl Osd {
         });
         if moving || pressed {
             self.poke();
+            self.pointer_moved = Instant::now();
         }
+        // Souris immobile (curseur masqué) ou télécommande utilisée depuis : pas de survol.
+        let hover = hover.filter(|_| self.pointer_moved.elapsed() < IDLE);
 
         let menu = self.menu.is_some();
         if menu {
             self.menu_keys(ctx, &view, &mut actions);
         }
-        let visible = view.paused || menu || self.scrub.is_some() || self.activity.elapsed() < IDLE;
+        let idle = if self.focus.is_some() { REMOTE_IDLE } else { IDLE };
+        let visible = view.paused || menu || self.scrub.is_some() || self.activity.elapsed() < idle;
         // Fondu vers l'opacité visée, sans la dépasser ni osciller une fois atteinte.
         let target_alpha = if visible { 1.0 } else { 0.0 };
         let step = dt / 0.2;
         self.alpha += (target_alpha - self.alpha).clamp(-step, step);
         let shown = self.alpha > 0.0;
+        self.seen = Seen {
+            shown: visible,
+            paused: view.paused,
+            live: view.live,
+            prompt: view.prompt.as_ref().map(|prompt| matches!(prompt, Prompt::NextUp { .. })),
+        };
+        // La sélection suit ce qui existe encore à l'écran.
+        if !visible {
+            self.focus = None;
+        }
+        if let Some(focus) = self.focus {
+            let exists = self.rows().iter().flatten().any(|target| *target == focus);
+            if !exists {
+                self.focus = Some(if self.seen.prompt.is_some() { Target::Accept } else { Target::PlayPause });
+            }
+        }
+        let current_focus = self.focus;
+        let focused = |target| current_focus == Some(target);
 
         // Boutons actifs : ceux de l'interface quand elle est visible, la proposition toujours.
         let mut hits: Vec<Hit> = Vec::new();
@@ -274,13 +419,13 @@ impl Osd {
             paint_shades(painter, screen, rem, alpha);
             paint_title(painter, screen, rem, view.item, view.live, alpha, images);
             let button = tracks_button(screen, rem);
-            let active = hovered == Some(Target::Tracks) || self.menu.is_some();
+            let active = hovered == Some(Target::Tracks) || self.menu.is_some() || focused(Target::Tracks);
             if active {
                 painter.circle_filled(button.center(), 1.9 * rem, white(alpha * 0.12));
             }
             tracks_icon(painter, button.center(), rem, white(alpha * if active { 1.0 } else { 0.85 }));
             for hit in &layout.controls {
-                let active = hovered == Some(hit.target);
+                let active = hovered == Some(hit.target) || focused(hit.target);
                 let color = white(alpha * if active { 1.0 } else { 0.85 });
                 if active {
                     painter.circle_filled(hit.rect.center(), 2.6 * rem, white(alpha * 0.12));
@@ -295,9 +440,13 @@ impl Osd {
             if view.live {
                 paint_live(painter, layout.bar, rem, alpha);
             } else if view.duration > 0.0 {
-                let bar_hovered = hovered == Some(Target::Bar) || self.scrub.is_some();
+                let bar_hovered = hovered == Some(Target::Bar) || self.scrub.is_some() || focused(Target::Bar);
                 paint_bar(painter, &layout, &view, shown_position, bar_hovered, alpha);
-                if bar_hovered {
+                if focused(Target::Bar) && hovered != Some(Target::Bar) {
+                    let x =
+                        layout.bar.left() + layout.bar.width() * (view.position / view.duration).clamp(0.0, 1.0) as f32;
+                    paint_bubble(painter, &layout, x, &clock(view.position), alpha);
+                } else if bar_hovered {
                     if let Some(position) = hover {
                         let time = self.scrub.unwrap_or_else(|| Self::time_at(layout.bar, position.x, view.duration));
                         paint_bubble(painter, &layout, position.x, &clock(time), alpha);
@@ -309,7 +458,19 @@ impl Osd {
         if let Some(focus) = self.menu {
             paint_menu(painter, menu_panel(screen, rem, &layout, &view), rem, &menu_rows, focus, hovered);
         }
-        let animating = paint_prompt(painter, screen, rem, view.prompt.as_ref(), &prompt_hits, hovered, images);
+        let highlighted = hovered.or(self.focus.filter(|target| matches!(target, Target::Accept | Target::Dismiss)));
+        let animating = paint_prompt(painter, screen, rem, view.prompt.as_ref(), &prompt_hits, highlighted, images);
+        // Bouton de proposition sélectionné à la télécommande : contour, comme les cartes.
+        let selected = prompt_hits.iter().find(|hit| self.focus == Some(hit.target) && hovered.is_none());
+        if let Some(hit) = selected {
+            let ring = hit.rect.expand(0.25 * rem);
+            painter.rect_stroke(
+                ring,
+                theme::corner(0.6 * rem),
+                Stroke::new(0.15 * rem, theme::TEXT),
+                egui::StrokeKind::Outside,
+            );
+        }
         Painted {
             actions,
             animating: animating || (self.alpha > 0.0 && self.alpha < 1.0) || visible,

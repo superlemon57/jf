@@ -37,6 +37,8 @@ const MAX_FRAME: usize = 64 * 1024;
 const REMOTE_SERVICE: &str = "com.apple.tvremoteservices";
 /// Avant vérification, une connexion n'a que le temps d'un appairage.
 const UNVERIFIED_LIMIT: Duration = Duration::from_secs(180);
+/// Connexion vérifiée sans télécommande ouverte (sonde de l'iPhone en arrière-plan).
+const BACKGROUND_LIMIT: Duration = Duration::from_secs(90);
 const IDLE_LIMIT: Duration = Duration::from_secs(3600);
 
 // Pavé tactile, en unités d'une surface de 1000 × 1000.
@@ -138,9 +140,21 @@ struct Session {
     seeking: Option<Seeking>,
     accepted: Instant,
     activity: Instant,
+    /// Numéro de la connexion, et iPhone vérifié qui l'utilise.
+    number: u64,
+    controller: Option<Vec<u8>>,
+    claimed: bool,
 }
 
 pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
+    // Un iPhone qui disparaît sans fermer la connexion (veille, Wi-Fi coupé) est détecté
+    // en une quarantaine de secondes au lieu de bloquer une place pendant une heure.
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(10))
+        .with_interval(Duration::from_secs(3))
+        .with_retries(8);
+    let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
+    let number = shared.connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let peer = stream.peer_addr().map(|address| address.to_string()).unwrap_or_default();
     trace!("{peer} : connexion");
     let mut session = Session {
@@ -165,10 +179,14 @@ pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
         seeking: None,
         accepted: Instant::now(),
         activity: Instant::now(),
+        number,
+        controller: None,
+        claimed: false,
     };
     if let Err(error) = session.run() {
         trace!("{peer} : fin ({error})");
     }
+    session.release();
 }
 
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a [u8]> {
@@ -187,6 +205,13 @@ fn check_signature(key: &VerifyingKey, data: &Tlv, message: &[u8]) -> Result<()>
 fn verification_cipher(shared: &[u8; 32]) -> Result<CompanionCipher> {
     let key = hkdf_expand("Pair-Verify-Encrypt-Salt", "Pair-Verify-Encrypt-Info", shared);
     CompanionCipher::new(&key, &key, 8)
+}
+
+/// UUID stable dérivé de l'identité, pour les identifiants annexes d'une Apple TV.
+fn derived_uuid(identity: &super::Identity, label: &str) -> String {
+    let hash = Sha256::new().chain_update(identity.private_key).chain_update(label.as_bytes()).finalize();
+    let hex = super::hex_upper(&hash[..16]);
+    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
 fn awake() -> Value {
@@ -225,10 +250,16 @@ impl Session {
                 self.handle_frame(header, &payload)?;
             }
             self.repeat();
-            let limit = if self.cipher.is_some() { IDLE_LIMIT } else { UNVERIFIED_LIMIT };
-            let since = if self.cipher.is_some() { self.activity } else { self.accepted };
+            let (limit, since) = match (self.cipher.is_some(), self.remote_open) {
+                (false, _) => (UNVERIFIED_LIMIT, self.accepted),
+                (true, false) => (BACKGROUND_LIMIT, self.activity),
+                (true, true) => (IDLE_LIMIT, self.activity),
+            };
             if since.elapsed() > limit {
                 return Err("connexion inactive".into());
+            }
+            if self.replaced() {
+                return Err("remplacée par une connexion plus récente du même iPhone".into());
             }
             if self.remote_open {
                 self.publish(false)?;
@@ -474,6 +505,7 @@ impl Session {
             &hkdf_expand("", "ClientEncrypt-main", &pending.shared),
             12,
         )?);
+        self.controller = Some(id.to_vec());
         trace!("iPhone vérifié, session chiffrée");
         Ok(())
     }
@@ -494,7 +526,15 @@ impl Session {
         let xid = message.get("_x").and_then(Value::as_int);
         let content = message.get("_c").unwrap_or(&Value::Null);
         trace!("message {:?} ({}) : {content}", self.identifier, if is_event { "événement" } else { "requête" });
-        let reply = |session: &mut Self| if is_event { Ok(()) } else { session.respond(xid, None, 0) };
+        // Tout message reçoit une réponse, événements compris : la télécommande d'iOS
+        // ferme la session si certaines restent sans réponse.
+        let reply = |session: &mut Self| session.respond(xid, None, 0);
+        if matches!(
+            self.identifier.as_deref(),
+            Some("_sessionStart" | "TVRCSessionStart" | "_hidC" | "HIDCommand" | "_hidT" | "HIDTouch")
+        ) {
+            self.claim();
+        }
 
         match self.identifier.clone().as_deref() {
             Some("_sessionStart") => {
@@ -553,6 +593,7 @@ impl Session {
                 reply(self)?;
             }
             Some("_interest") => {
+                reply(self)?;
                 if let Some(Value::Array(events)) = content.get("_regEvents") {
                     let events: Vec<String> = events.iter().filter_map(Value::as_str).map(str::to_owned).collect();
                     for event in events {
@@ -591,8 +632,7 @@ impl Session {
                 ]);
                 self.respond(xid, Some(content), 2)?;
             }
-            _ if xid.is_some() && !is_event => self.respond(xid, None, 0)?,
-            _ => {}
+            _ => reply(self)?,
         }
         Ok(())
     }
@@ -612,7 +652,54 @@ impl Session {
             Value::kv("model", Value::str(DEVICE_MODEL)),
             Value::kv("name", Value::str(&self.shared.name)),
             Value::kv("_lP", Value::Int(self.shared.companion_port.into())),
+            // Champs d'une vraie Apple TV, d'après windows-apple-remote (iOS 27).
+            Value::kv("_idsID", Value::str(&derived_uuid(identity, "ids"))),
+            Value::kv("_mRtID", Value::str(&identity.identifier)),
+            Value::kv("_bf", Value::Int(1920)),
+            Value::kv("_clFl", Value::Int(128)),
+            Value::kv("_msSt", Value::Int(1)),
+            Value::kv("_msRo", Value::Int(1)),
+            Value::kv("_dCapF", Value::Int(1)),
+            Value::kv(
+                "_siriInfo",
+                Value::dict(vec![
+                    Value::kv("collectorElectionVersion", Value::Double(1.0)),
+                    Value::kv(
+                        "peerData",
+                        Value::dict(vec![
+                            Value::kv("productType", Value::str(DEVICE_MODEL)),
+                            Value::kv("userInterfaceIdiom", Value::str("ZEUS")),
+                            Value::kv("userAssignedDeviceName", Value::str(&self.shared.name)),
+                            Value::kv("assistantIdentifier", Value::str(&derived_uuid(identity, "assistant"))),
+                            Value::kv("sharedUserIdentifier", Value::str(&derived_uuid(identity, "user"))),
+                            Value::kv("isLocationSharingDevice", Value::Bool(false)),
+                            Value::kv("isSiriCloudSyncEnabled", Value::Bool(false)),
+                        ]),
+                    ),
+                ]),
+            ),
         ])
+    }
+
+    /// Cette connexion devient celle de la télécommande de l'iPhone vérifié.
+    fn claim(&mut self) {
+        if let (false, Some(controller)) = (self.claimed, &self.controller) {
+            self.shared.remotes.lock().unwrap().insert(controller.clone(), self.number);
+            self.claimed = true;
+        }
+    }
+
+    fn replaced(&self) -> bool {
+        let Some(controller) = self.controller.as_ref().filter(|_| self.claimed) else { return false };
+        self.shared.remotes.lock().unwrap().get(controller).is_some_and(|number| *number != self.number)
+    }
+
+    fn release(&self) {
+        let Some(controller) = self.controller.as_ref().filter(|_| self.claimed) else { return };
+        let mut remotes = self.shared.remotes.lock().unwrap();
+        if remotes.get(controller) == Some(&self.number) {
+            remotes.remove(controller);
+        }
     }
 
     // ---------------------------------------------------------------- entrées

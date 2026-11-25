@@ -122,15 +122,27 @@ contrôle de l'iPhone (et l'app « Remote ») le trouve sous le nom `jf`.
 
 | Sur l'iPhone | Dans jf |
 |---|---|
-| glisser, flèches | se déplacer ; en lecture, ±10 s (gauche/droite) et ±60 s (haut/bas) |
-| toucher, bouton central | valider ; en lecture, « Passer l'intro », « Épisode suivant » ou pause |
-| appui long (pavé ou bouton central) | menu d'options (lecture aléatoire, marquer comme vu…) ; en lecture, panneau « Sous-titres et audio » |
-| retour | page précédente ; en lecture, écarter le compte à rebours, sinon arrêter |
+| glisser, flèches | se déplacer |
+| toucher, bouton central | valider |
+| appui long (pavé ou bouton central) | menu d'options (lecture aléatoire, marquer comme vu…) |
+| retour | page précédente |
 | TV | accueil (arrête la lecture) |
 | lecture/pause, ±10 s | commandes de lecture |
 | boutons de volume | volume du système |
 | chaîne + / − | élément suivant ou précédent (zapper en TV en direct) |
 | sous-titres | activer ou couper les sous-titres |
+
+Pendant la lecture, l'interface se pilote aux flèches :
+
+- interface masquée : gauche/droite reculent ou avancent de 10 s, le bouton central met
+  en pause (ou valide « Passer l'intro », « Épisode suivant »), haut/bas l'affichent ;
+- interface affichée : les flèches déplacent la sélection entre le bouton
+  « Sous-titres et audio » en haut à droite, les commandes centrales, la proposition
+  affichée et la barre de progression (gauche/droite y reculent ou avancent) ; le bouton
+  central active l'élément sélectionné ;
+- l'appui long ouvre directement le panneau « Sous-titres et audio » ;
+- retour ferme le panneau, puis masque l'interface, puis écarte le compte à rebours,
+  puis arrête la lecture (la position est conservée).
 
 Seuls les iPhone appairés avec le code affiché à l'écran peuvent piloter jf ; leurs clés
 sont dans `~/.config/jf/apple-tv/`. Supprimer ce dossier oublie tous les iPhone.

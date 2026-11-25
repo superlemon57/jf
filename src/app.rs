@@ -382,22 +382,18 @@ impl App {
                 remote::Command::Key(key) if playing && self.osd.menu_open() => self.osd.remote_key(&key),
                 remote::Command::Key(key) if playing => match key.as_str() {
                     "menu" => self.osd.open_menu(),
-                    "ok" => {
-                        if !self.player.accept(&self.tasks) {
-                            let _ = self.player.mpv.command(&["cycle", "pause"]);
-                        }
+                    "up" | "down" | "left" | "right" | "ok" => {
+                        let actions = self.osd.remote(&key);
+                        self.apply_osd(actions);
                     }
                     "playpause" => mpv(&["cycle", "pause"]),
                     "play" => self.player.mpv.set("pause", "no"),
                     "pause" => self.player.mpv.set("pause", "yes"),
-                    "left" => mpv(&["seek", "-10"]),
-                    "right" => mpv(&["seek", "10"]),
-                    "down" => mpv(&["seek", "-60"]),
-                    "up" => mpv(&["seek", "60"]),
                     "next" => self.player.skip(1, &self.tasks),
                     "previous" => self.player.skip(-1, &self.tasks),
+                    // Retour : masque l'interface, puis écarte le compte à rebours, puis arrête.
                     "back" => {
-                        if !self.player.dismiss() {
+                        if !self.osd.hide() && !self.player.dismiss() {
                             self.stop_playback();
                         }
                     }
@@ -642,7 +638,17 @@ impl App {
         };
         let painted = self.osd.paint(ui, view, &mut self.images);
         self.raise_subtitles(painted.controls_shown);
-        for action in painted.actions {
+        self.apply_osd(painted.actions);
+        // Rafraîchit l'interface et l'état de la télécommande même en pause.
+        if painted.animating {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn apply_osd(&mut self, actions: Vec<osd::Action>) {
+        for action in actions {
             self.osd.poke();
             let mpv = &self.player.mpv;
             match action {
@@ -666,12 +672,6 @@ impl App {
                 }
                 osd::Action::SelectTrack(kind, id) => self.player.select_track(kind, id),
             }
-        }
-        // Rafraîchit l'interface et l'état de la télécommande même en pause.
-        if painted.animating {
-            ctx.request_repaint_after(Duration::from_millis(100));
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
 
