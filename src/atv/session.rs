@@ -17,7 +17,7 @@ use super::crypto::{hkdf_expand, CompanionCipher};
 use super::opack::{self, Value};
 use super::srp::SrpServer;
 use super::tlv::{self, tags};
-use super::{trace, Shared, DEVICE_MODEL};
+use super::{trace, Shared, DEVICE_MODEL, SOURCE_VERSION};
 use crate::player::TrackKind;
 use crate::remote::{self, Command};
 
@@ -138,10 +138,6 @@ struct Session {
     seeking: Option<Seeking>,
     accepted: Instant,
     activity: Instant,
-    /// Numéro de la connexion, et iPhone vérifié qui l'utilise.
-    number: u64,
-    controller: Option<Vec<u8>>,
-    claimed: bool,
 }
 
 pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
@@ -152,7 +148,6 @@ pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
         .with_interval(Duration::from_secs(3))
         .with_retries(8);
     let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
-    let number = shared.connections.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let peer = stream.peer_addr().map(|address| address.to_string()).unwrap_or_default();
     trace!("{peer} : connexion");
     let mut session = Session {
@@ -177,14 +172,10 @@ pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
         seeking: None,
         accepted: Instant::now(),
         activity: Instant::now(),
-        number,
-        controller: None,
-        claimed: false,
     };
     if let Err(error) = session.run() {
         trace!("{peer} : fin ({error})");
     }
-    session.release();
 }
 
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a [u8]> {
@@ -246,9 +237,6 @@ impl Session {
             if since.elapsed() > limit {
                 return Err("connexion inactive".into());
             }
-            if self.replaced() {
-                return Err("remplacée par une connexion plus récente du même iPhone".into());
-            }
             if self.remote_open {
                 self.publish(false)?;
             }
@@ -308,14 +296,12 @@ impl Session {
         self.stream.write_all(&header).map_err(|error| error.to_string())
     }
 
-    fn respond(&mut self, xid: Option<u64>, content: Option<Value>, result_type: u64) -> Result<()> {
-        trace!("→ réponse à {:?}", self.identifier);
-        let mut response =
-            vec![Value::kv("_c", content.unwrap_or(Value::dict(vec![]))), Value::kv("_t", Value::Int(3))];
-        let bare = matches!(self.identifier.as_deref(), Some("_sessionStart" | "_sessionStop"));
-        if !bare {
-            response.push(Value::kv("_rT", Value::Int(result_type)));
-        }
+    /// Réponse au format d'une vraie Apple TV : `{_c, _t: 3, _x}`, sans autre champ
+    /// (documentation de pyatv ; `_rT` n'existe pas dans les réponses d'Apple).
+    fn respond(&mut self, xid: Option<u64>, content: Option<Value>) -> Result<()> {
+        let content = content.unwrap_or(Value::dict(vec![]));
+        trace!("→ réponse à {:?} (_x {xid:?}) : {content}", self.identifier);
+        let mut response = vec![Value::kv("_c", content), Value::kv("_t", Value::Int(3))];
         if let Some(xid) = xid {
             response.push(Value::kv("_x", Value::Int(xid)));
         }
@@ -348,8 +334,9 @@ impl Session {
             }
             let plain = cipher.decrypt(payload, Some(&header), None)?;
             if matches!(kind, U_OPACK | E_OPACK | P_OPACK) {
-                if let Ok((message, _)) = opack::unpack(&plain) {
-                    self.handle_message(&message)?;
+                match opack::unpack(&plain) {
+                    Ok((message, _)) => self.handle_message(&message)?,
+                    Err(error) => trace!("message illisible ({error}) : {} octets", plain.len()),
                 }
             }
             return Ok(());
@@ -494,7 +481,6 @@ impl Session {
             &hkdf_expand("", "ClientEncrypt-main", &pending.shared),
             12,
         )?);
-        self.controller = Some(id.to_vec());
         trace!("iPhone vérifié, session chiffrée");
         Ok(())
     }
@@ -514,19 +500,12 @@ impl Session {
             .map(str::to_owned);
         let xid = message.get("_x").and_then(Value::as_int);
         let content = message.get("_c").unwrap_or(&Value::Null);
-        trace!("message {:?} ({}) : {content}", self.identifier, if is_event { "événement" } else { "requête" });
-        let reply = |session: &mut Self| if is_event { Ok(()) } else { session.respond(xid, None, 0) };
-        // Seule l'ouverture de la télécommande (ou une commande) fait de cette connexion
-        // celle de l'iPhone : ses autres connexions (sondes, présence) ne la remplacent pas.
-        let remote_service = content.get("_srvT").is_none_or(|service| service.as_str() == Some(REMOTE_SERVICE));
-        let claims = match self.identifier.as_deref() {
-            Some("_sessionStart") => remote_service,
-            Some("TVRCSessionStart" | "_hidC" | "HIDCommand" | "_hidT" | "HIDTouch") => true,
-            _ => false,
-        };
-        if claims {
-            self.claim();
-        }
+        trace!(
+            "message {:?} ({}, _x {xid:?}) : {content}",
+            self.identifier,
+            if is_event { "événement" } else { "requête" }
+        );
+        let reply = |session: &mut Self| if is_event { Ok(()) } else { session.respond(xid, None) };
 
         match self.identifier.clone().as_deref() {
             Some("_sessionStart") => {
@@ -534,13 +513,13 @@ impl Session {
                     self.remote_open = true;
                 }
                 let content = Value::dict(vec![Value::kv("_sid", Value::Int(self.session_id.into()))]);
-                self.respond(xid, Some(content), 0)?;
+                self.respond(xid, Some(content))?;
             }
             Some("TVRCSessionStart") => {
                 self.remote_open = true;
                 let version = content.get("ProtocolVersionKey").and_then(Value::as_str).unwrap_or("1.2").to_owned();
                 let content = Value::dict(vec![Value::kv("ProtocolVersionKey", Value::str(&version))]);
-                self.respond(xid, Some(content), 0)?;
+                self.respond(xid, Some(content))?;
                 self.publish(true)?;
             }
             Some(name @ ("_sessionStop" | "TVRCSessionStop" | "_touchStop" | "HIDTouchStop")) => {
@@ -551,7 +530,7 @@ impl Session {
                     self.remote_open = false;
                     self.published = None;
                 }
-                self.respond(xid, None, 0)?;
+                self.respond(xid, None)?;
             }
             Some(name @ ("_touchStart" | "HIDTouchStart")) => {
                 let (key, width, height) = if name == "HIDTouchStart" {
@@ -568,7 +547,7 @@ impl Session {
                 };
                 self.touch = None;
                 self.touch_size = (size(width), size(height));
-                self.respond(xid, Some(Value::dict(vec![Value::kv(key, Value::Int(1))])), 0)?;
+                self.respond(xid, Some(Value::dict(vec![Value::kv(key, Value::Int(1))])))?;
             }
             Some(name @ ("_hidC" | "HIDCommand")) => {
                 reply(self)?;
@@ -596,14 +575,18 @@ impl Session {
                     }
                 }
             }
-            // Réponse vide, comme à une requête inconnue : avec nos informations d'appareil,
-            // l'iPhone (iOS 24A446) attend 40 s sans ouvrir la télécommande puis abandonne,
-            // alors qu'avec une réponse vide il enchaîne aussitôt (journaux du 25/11/2026).
-            Some("_systemInfo" | "SystemInfo") => self.respond(xid, None, 0)?,
-            Some("FetchAttentionState") => self.respond(xid, Some(awake()), 0)?,
+            // Fiche de l'appareil, comme une vraie Apple TV. Indispensable sur les connexions
+            // ouvertes par rapportd lui-même (bit de poids fort de `_x`) : sans elle, iOS ne
+            // tient pas jf pour joignable et la télécommande reste sur « Connexion » puis
+            // abandonne au bout de 33 s (journal du 25/11/2026, 14:56).
+            Some("_systemInfo" | "SystemInfo") => {
+                let info = self.system_info();
+                self.respond(xid, Some(info))?;
+            }
+            Some("FetchAttentionState") => self.respond(xid, Some(awake()))?,
             Some("FetchMediaControlStatus") => {
                 let flags = self.flags_value();
-                self.respond(xid, Some(flags), 0)?;
+                self.respond(xid, Some(flags))?;
             }
             Some("FetchCurrentNowPlayingInfoEvent") => {
                 reply(self)?;
@@ -619,33 +602,71 @@ impl Session {
                     Value::kv("AppCountKey", Value::Int(0)),
                     Value::kv("AppInfos", Value::dict(vec![])),
                 ]);
-                self.respond(xid, Some(content), 2)?;
+                self.respond(xid, Some(content))?;
             }
-            _ if xid.is_some() && !is_event => self.respond(xid, None, 0)?,
+            _ if xid.is_some() && !is_event => self.respond(xid, None)?,
             _ => {}
         }
         Ok(())
     }
 
-    /// Cette connexion devient celle de la télécommande de l'iPhone vérifié.
-    fn claim(&mut self) {
-        if let (false, Some(controller)) = (self.claimed, &self.controller) {
-            self.shared.remotes.lock().unwrap().insert(controller.clone(), self.number);
-            self.claimed = true;
-        }
-    }
-
-    fn replaced(&self) -> bool {
-        let Some(controller) = self.controller.as_ref().filter(|_| self.claimed) else { return false };
-        self.shared.remotes.lock().unwrap().get(controller).is_some_and(|number| *number != self.number)
-    }
-
-    fn release(&self) {
-        let Some(controller) = self.controller.as_ref().filter(|_| self.claimed) else { return };
-        let mut remotes = self.shared.remotes.lock().unwrap();
-        if remotes.get(controller) == Some(&self.number) {
-            remotes.remove(controller);
-        }
+    /// Fiche `_systemInfo` d'une Apple TV 4K, cohérente avec l'annonce Bonjour : `_i` = rpHI,
+    /// `_pubID` = rpBA, `_mrID`/`_mRtID` = rpMRtID (d'après linux-apple-remote, iOS 26/27).
+    fn system_info(&self) -> Value {
+        let identity = &self.shared.identity;
+        let name = self.shared.name.as_str();
+        let port = self.stream.local_addr().map(|address| address.port()).unwrap_or(0);
+        let services = [
+            REMOTE_SERVICE,
+            "com.apple.bluetooth.remote",
+            "com.apple.siri.wakeup",
+            "com.apple.home.messaging",
+            "com.apple.workflow.remotewidgets",
+            "com.apple.devicediscoveryui.rapportwake",
+        ];
+        let siri = Value::dict(vec![
+            Value::kv("collectorElectionVersion", Value::Double(1.0)),
+            Value::kv(
+                "peerData",
+                Value::dict(vec![
+                    Value::kv("productType", Value::str(DEVICE_MODEL)),
+                    Value::kv("userInterfaceIdiom", Value::str("ZEUS")),
+                    Value::kv("userAssignedDeviceName", Value::str(name)),
+                    Value::kv("assistantIdentifier", Value::str(&identity.uuid("assistant"))),
+                    Value::kv("sharedUserIdentifier", Value::str(&identity.uuid("user"))),
+                    Value::kv("isLocationSharingDevice", Value::Bool(false)),
+                    Value::kv("isSiriCloudSyncEnabled", Value::Bool(false)),
+                ]),
+            ),
+            Value::kv(
+                "audio-session-coordination.system-info",
+                Value::dict(vec![
+                    Value::kv("isSupportedAndEnabled", Value::Bool(false)),
+                    Value::kv("mediaRemoteGroupIdentifier", Value::str(&identity.uuid("group"))),
+                    Value::kv("mediaRemoteRouteIdentifier", Value::str(&identity.identifier)),
+                ]),
+            ),
+        ]);
+        Value::dict(vec![
+            Value::kv("name", Value::str(name)),
+            Value::kv("model", Value::str(DEVICE_MODEL)),
+            Value::kv("_sv", Value::str(SOURCE_VERSION)),
+            Value::kv("_i", Value::str(&identity.alias("rpHI:"))),
+            Value::kv("_idsID", Value::str(&identity.uuid("ids"))),
+            Value::kv("_pubID", Value::str(&identity.bluetooth())),
+            Value::kv("_mrID", Value::str(&identity.identifier)),
+            Value::kv("_mRtID", Value::str(&identity.identifier)),
+            Value::kv("_lP", Value::Int(port.into())),
+            Value::kv("_stA", Value::Array(services.iter().map(|service| Value::str(service)).collect())),
+            Value::kv("_sf", Value::Int(65536)),
+            Value::kv("_bf", Value::Int(1920)),
+            Value::kv("_cf", Value::Int(512)),
+            Value::kv("_clFl", Value::Int(128)),
+            Value::kv("_msSt", Value::Int(1)),
+            Value::kv("_msRo", Value::Int(1)),
+            Value::kv("_dCapF", Value::Int(1)),
+            Value::kv("_siriInfo", siri),
+        ])
     }
 
     // ---------------------------------------------------------------- entrées
@@ -864,7 +885,7 @@ impl Session {
         if is_event {
             return Ok(());
         }
-        self.respond(xid, response, 0)
+        self.respond(xid, response)
     }
 
     /// Active les premiers sous-titres disponibles, ou les coupe.

@@ -12,13 +12,12 @@ mod session;
 mod srp;
 mod tlv;
 
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -42,13 +41,38 @@ const PAIRING_ATTEMPTS: u8 = 3;
 const PAIRING_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 32;
 
-/// Journal du protocole sur la sortie d'erreur, activé par `JF_LOG=1`.
-fn logging() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("JF_LOG").is_some_and(|value| value != "0"))
+/// Journal du protocole, toujours écrit dans `~/.cache/jf/apple-tv.log` (le précédent est
+/// gardé en `.log.1`) pour qu'un souci avec l'iPhone laisse une trace sans rien préparer ;
+/// `JF_LOG=1` le recopie aussi sur la sortie d'erreur.
+static LOG: Mutex<Option<fs::File>> = Mutex::new(None);
+const LOG_LIMIT: u64 = 8 * 1024 * 1024;
+
+fn open_log() {
+    let directory = crate::config::cache_dir();
+    let path = directory.join("apple-tv.log");
+    let _ = fs::create_dir_all(&directory);
+    let _ = fs::rename(&path, directory.join("apple-tv.log.1"));
+    if let Ok(mut file) = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&path) {
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let _ = writeln!(file, "jf {} — démarré à {} (secondes Unix)", env!("CARGO_PKG_VERSION"), since.as_secs());
+        *LOG.lock().unwrap() = Some(file);
+    }
+    clock();
 }
 
-/// Secondes écoulées depuis le premier message du journal.
+pub(crate) fn log_line(line: &str) {
+    let line = format!("[apple-tv {:9.3}] {line}", clock());
+    if std::env::var_os("JF_LOG").is_some_and(|value| value != "0") {
+        eprintln!("{line}");
+    }
+    if let Some(file) = LOG.lock().unwrap().as_mut() {
+        if file.metadata().is_ok_and(|meta| meta.len() < LOG_LIMIT) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
+/// Secondes écoulées depuis l'ouverture du journal.
 fn clock() -> f64 {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
@@ -56,9 +80,7 @@ fn clock() -> f64 {
 
 macro_rules! trace {
     ($($argument:tt)*) => {
-        if $crate::atv::logging() {
-            eprintln!("[apple-tv {:9.3}] {}", $crate::atv::clock(), format!($($argument)*));
-        }
+        $crate::atv::log_line(&format!($($argument)*))
     };
 }
 pub(crate) use trace;
@@ -68,6 +90,27 @@ struct Identity {
     private_key: [u8; 32],
     identifier: String,
     mac: [u8; 6],
+}
+
+impl Identity {
+    /// Valeur dérivée de l'identifiant public, en hexadécimal minuscule comme sur une
+    /// vraie Apple TV ou un HomePod (rpHI, rpAD…). La clé privée n'y entre jamais.
+    fn alias(&self, label: &str) -> String {
+        let hash = Sha256::new().chain_update(label).chain_update(self.identifier.as_bytes()).finalize();
+        hash[..6].iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// UUID stable dérivé de l'identifiant public.
+    fn uuid(&self, label: &str) -> String {
+        let hash = Sha256::new().chain_update(label).chain_update(self.identifier.as_bytes()).finalize();
+        let hex: String = hash[..16].iter().map(|byte| format!("{byte:02X}")).collect();
+        format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+    }
+
+    /// Adresse Bluetooth annoncée (rpBA), aussi donnée comme `_pubID`.
+    fn bluetooth(&self) -> String {
+        self.mac.map(|byte| format!("{byte:02X}")).join(":")
+    }
 }
 
 struct PairingWindow {
@@ -92,10 +135,6 @@ pub struct Shared {
     pairing: Mutex<PairingState>,
     /// Message à afficher par l'interface (« iPhone jumelé »).
     notice: Mutex<Option<String>>,
-    /// Connexion active de chaque iPhone, par identifiant : une nouvelle télécommande
-    /// ouverte par le même iPhone remplace l'ancienne connexion.
-    remotes: Mutex<HashMap<Vec<u8>, u64>>,
-    connections: AtomicU64,
     pub(crate) state: remote::Shared,
     commands: Sender<remote::Command>,
     ui: egui::Context,
@@ -252,10 +291,6 @@ fn bind(port: u16) -> io::Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).or_else(|_| TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))
 }
 
-fn hex_upper(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
-}
-
 /// Démarre l'annonce Bonjour et les connexions. `name` est le nom affiché sur l'iPhone.
 pub fn start(
     name: &str,
@@ -264,6 +299,7 @@ pub fn start(
     commands: Sender<remote::Command>,
     ui: egui::Context,
 ) -> Result<Handle, String> {
+    open_log();
     let ip = local_ip().ok_or("aucune adresse sur le réseau local")?;
     let identity = load_identity(&directory).map_err(|error| error.to_string())?;
     let companion = bind(PORT).map_err(|error| error.to_string())?;
@@ -275,8 +311,6 @@ pub fn start(
         directory,
         pairing: Mutex::default(),
         notice: Mutex::default(),
-        remotes: Mutex::default(),
-        connections: AtomicU64::new(0),
         state,
         commands,
         ui,
@@ -307,16 +341,12 @@ pub fn start(
 /// jamais, et la télécommande reste sur « Connexion ».
 fn advertise(shared: &Shared, ip: Ipv4Addr, port: u16) -> Result<(ServiceDaemon, Vec<String>), mdns_sd::Error> {
     let identity = &shared.identity;
-    let mac = identity.mac.map(|byte| format!("{byte:02X}")).join(":");
-    let mac_id = mac.replace(':', "");
-    let alias = |label: &str, bytes: usize| {
-        let hash = Sha256::new().chain_update(label).chain_update(identity.identifier.as_bytes()).finalize();
-        hex_upper(&hash[..bytes])
-    };
-    let (rp_hn, rp_ad, rp_hi) = (alias("rpHN:", 6), alias("rpAD:", 6), alias("rpHI:", 6));
+    let mac = identity.bluetooth();
+    let (rp_ha, rp_hn, rp_ad, rp_hi) =
+        (identity.alias("rpHA:"), identity.alias("rpHN:"), identity.alias("rpAD:"), identity.alias("rpHI:"));
     let txt = [
         ("rpMac", "2"),
-        ("rpHA", mac_id.as_str()),
+        ("rpHA", rp_ha.as_str()),
         ("rpHN", &rp_hn),
         ("rpVr", SOURCE_VERSION),
         ("rpMd", DEVICE_MODEL),
@@ -329,7 +359,7 @@ fn advertise(shared: &Shared, ip: Ipv4Addr, port: u16) -> Result<(ServiceDaemon,
     let daemon = ServiceDaemon::new()?;
     daemon.disable_interface(IfKind::All)?;
     daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip)))?;
-    let host = format!("jf-{}.local.", mac_id.to_lowercase());
+    let host = format!("jf-{}.local.", mac.replace(':', "").to_lowercase());
     let info = ServiceInfo::new("_companion-link._tcp.local.", &shared.name, &host, IpAddr::V4(ip), port, &txt[..])?;
     let services = vec![info.get_fullname().to_owned()];
     daemon.register(info)?;

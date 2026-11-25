@@ -142,14 +142,15 @@ impl fmt::Display for OpackError {
 
 impl std::error::Error for OpackError {}
 
-/// Pack a value with OPACK, byte-identical to `fake_atv.opack_pack`.
+/// Pack a value with OPACK.
 pub fn pack(data: &Value) -> Vec<u8> {
-    let mut objects: Vec<Vec<u8>> = Vec::new();
-    pack_inner(data, &mut objects)
+    pack_inner(data)
 }
 
-fn pack_inner(data: &Value, objects: &mut Vec<Vec<u8>>) -> Vec<u8> {
-    let packed: Vec<u8> = match data {
+/// Sans références arrière : chaque valeur est écrite en entier, ce qui reste valide pour
+/// iOS quelle que soit la façon dont son décodeur numérote les objets (conteneurs compris).
+fn pack_inner(data: &Value) -> Vec<u8> {
+    match data {
         Value::Null => vec![0x04],
         Value::Bool(b) => vec![if *b { 1 } else { 2 }],
         Value::Uuid(u) => {
@@ -228,7 +229,7 @@ fn pack_inner(data: &Value, objects: &mut Vec<Vec<u8>>) -> Vec<u8> {
         Value::Array(items) => {
             let mut out = vec![0xD0 + items.len().min(0xF) as u8];
             for item in items {
-                out.extend_from_slice(&pack_inner(item, objects));
+                out.extend_from_slice(&pack_inner(item));
             }
             if items.len() >= 0xF {
                 out.push(0x03);
@@ -238,32 +239,15 @@ fn pack_inner(data: &Value, objects: &mut Vec<Vec<u8>>) -> Vec<u8> {
         Value::Dict(entries) => {
             let mut out = vec![0xE0 + entries.len().min(0xF) as u8];
             for (key, value) in entries {
-                out.extend_from_slice(&pack_inner(key, objects));
-                out.extend_from_slice(&pack_inner(value, objects));
+                out.extend_from_slice(&pack_inner(key));
+                out.extend_from_slice(&pack_inner(value));
             }
             if entries.len() >= 0xF {
                 out.push(0x03);
             }
             out
         }
-    };
-
-    // Reuse via the object-reference table when possible.
-    if packed.len() > 1 {
-        if let Some(index) = objects.iter().position(|o| *o == packed) {
-            if index < 0x21 {
-                return vec![0xA0 + index as u8];
-            }
-            if index <= 0xFF {
-                return vec![0xC1, index as u8];
-            }
-            let mut out = vec![0xC2];
-            out.extend_from_slice(&(index as u16).to_le_bytes());
-            return out;
-        }
-        objects.push(packed.clone());
     }
-    packed
 }
 
 /// Unpack OPACK data, returning the value and the remaining bytes,
@@ -510,20 +494,30 @@ fn spend(budget: &mut usize, amount: usize) -> Result<(), OpackError> {
 mod tests {
     use super::*;
 
-    /// Une chaîne vide avant une référence ne doit pas la décaler (bug vu avec iOS).
+    /// Une chaîne vide avant une référence ne doit pas la décaler (bug vu avec iOS) :
+    /// message encodé comme le fait iOS, la seconde « _systemInfo » étant une référence.
     #[test]
     fn empty_string_does_not_shift_references() {
-        let message = Value::dict(vec![
-            Value::kv("myriadTrialTreatment", Value::str("")),
-            Value::kv("_i", Value::str("_systemInfo")),
-            Value::kv("copie", Value::str("_systemInfo")),
-        ]);
-        let packed = pack(&message);
-        // L'encodeur a bien remplacé la seconde occurrence par une référence.
-        assert!(packed.len() < 60);
+        let mut packed = vec![0xE3, 0x40 + 20];
+        packed.extend_from_slice(b"myriadTrialTreatment");
+        packed.push(0x40);
+        packed.extend_from_slice(b"\x42_i\x4B_systemInfo\x45copie");
+        packed.push(0xA2);
         let (decoded, rest) = unpack(&packed).unwrap();
         assert!(rest.is_empty());
         assert_eq!(decoded.get("_i").and_then(Value::as_str), Some("_systemInfo"));
-        assert_eq!(decoded, message);
+        assert_eq!(decoded.get("copie").and_then(Value::as_str), Some("_systemInfo"));
+    }
+
+    /// L'encodeur écrit chaque valeur en entier, même répétée.
+    #[test]
+    fn pack_writes_repeated_values_in_full() {
+        let message = Value::dict(vec![
+            Value::kv("_mrID", Value::str("D673FFD8-BD19-C0F3-CB0B-4D78E4C7140B")),
+            Value::kv("_mRtID", Value::str("D673FFD8-BD19-C0F3-CB0B-4D78E4C7140B")),
+        ]);
+        let packed = pack(&message);
+        assert!(!packed.iter().any(|byte| (0xA0..=0xC4).contains(byte)));
+        assert_eq!(unpack(&packed).unwrap().0, message);
     }
 }
