@@ -17,7 +17,7 @@ use super::crypto::{hkdf_expand, CompanionCipher};
 use super::opack::{self, Value};
 use super::srp::SrpServer;
 use super::tlv::{self, tags};
-use super::{trace, Shared, DEVICE_MODEL, SOURCE_VERSION};
+use super::{trace, Shared, DEVICE_MODEL};
 use crate::player::TrackKind;
 use crate::remote::{self, Command};
 
@@ -309,10 +309,10 @@ impl Session {
     }
 
     fn respond(&mut self, xid: Option<u64>, content: Option<Value>, result_type: u64) -> Result<()> {
+        trace!("→ réponse à {:?}", self.identifier);
         let mut response =
             vec![Value::kv("_c", content.unwrap_or(Value::dict(vec![]))), Value::kv("_t", Value::Int(3))];
-        let bare =
-            matches!(self.identifier.as_deref(), Some("_systemInfo" | "SystemInfo" | "_sessionStart" | "_sessionStop"));
+        let bare = matches!(self.identifier.as_deref(), Some("_sessionStart" | "_sessionStop"));
         if !bare {
             response.push(Value::kv("_rT", Value::Int(result_type)));
         }
@@ -323,6 +323,7 @@ impl Session {
     }
 
     fn event(&mut self, name: &str, content: Value) -> Result<()> {
+        trace!("→ événement {name}");
         let xid = self.next_event;
         self.next_event = self.next_event.wrapping_add(1) | 0x8000_0000;
         let event = Value::dict(vec![
@@ -595,12 +596,10 @@ impl Session {
                     }
                 }
             }
-            Some("_systemInfo" | "SystemInfo") => {
-                let info = self.system_info();
-                self.respond(xid, Some(info), 0)?;
-                self.event("SystemStatus", awake())?;
-                self.event("TVSystemStatus", awake())?;
-            }
+            // Réponse vide, comme à une requête inconnue : avec nos informations d'appareil,
+            // l'iPhone (iOS 24A446) attend 40 s sans ouvrir la télécommande puis abandonne,
+            // alors qu'avec une réponse vide il enchaîne aussitôt (journaux du 25/11/2026).
+            Some("_systemInfo" | "SystemInfo") => self.respond(xid, None, 0)?,
             Some("FetchAttentionState") => self.respond(xid, Some(awake()), 0)?,
             Some("FetchMediaControlStatus") => {
                 let flags = self.flags_value();
@@ -626,24 +625,6 @@ impl Session {
             _ => {}
         }
         Ok(())
-    }
-
-    fn system_info(&self) -> Value {
-        let identity = &self.shared.identity;
-        let mac = identity.mac.map(|byte| format!("{byte:02X}")).join(":");
-        Value::dict(vec![
-            Value::kv("_sf", Value::Int(65536)),
-            Value::kv("_cf", Value::Int(512)),
-            Value::kv("_i", Value::str(&super::hex_upper(&identity.mac))),
-            Value::kv("_pubID", Value::str(&mac)),
-            Value::kv("_spID", Value::str(&identity.identifier)),
-            Value::kv("_mrID", Value::str(&identity.identifier)),
-            Value::kv("_stA", Value::Array(vec![Value::str(REMOTE_SERVICE)])),
-            Value::kv("_sv", Value::str(SOURCE_VERSION)),
-            Value::kv("model", Value::str(DEVICE_MODEL)),
-            Value::kv("name", Value::str(&self.shared.name)),
-            Value::kv("_lP", Value::Int(self.shared.companion_port.into())),
-        ])
     }
 
     /// Cette connexion devient celle de la télécommande de l'iPhone vérifié.

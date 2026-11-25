@@ -23,6 +23,9 @@ Usage : jf [OPTIONS]
 
   -f, --fullscreen   démarrer en plein écran
       --logout       oublier la session enregistrée
+      --reset-apple-tv
+                     nouvelle identité Apple TV : oublie les iPhone appairés,
+                     qui verront un nouvel appareil (à appairer de nouveau)
   -h, --help         afficher cette aide
   -V, --version      afficher la version";
 
@@ -38,6 +41,23 @@ fn main() -> ExitCode {
                 return match config.save() {
                     Ok(()) => {
                         println!("Session oubliée.");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) => {
+                        eprintln!("jf : {error}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
+            "--reset-apple-tv" => {
+                let directory = config::config_dir().join("apple-tv");
+                return match std::fs::remove_dir_all(&directory) {
+                    Ok(()) => {
+                        println!("Identité Apple TV réinitialisée : appairez de nouveau l'iPhone.");
+                        ExitCode::SUCCESS
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        println!("Rien à réinitialiser.");
                         ExitCode::SUCCESS
                     }
                     Err(error) => {

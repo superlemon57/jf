@@ -89,7 +89,6 @@ pub struct Shared {
     name: String,
     identity: Identity,
     directory: PathBuf,
-    companion_port: u16,
     pairing: Mutex<PairingState>,
     /// Message à afficher par l'interface (« iPhone jumelé »).
     notice: Mutex<Option<String>>,
@@ -104,7 +103,23 @@ pub struct Shared {
 
 pub struct Handle {
     shared: Arc<Shared>,
-    _mdns: ServiceDaemon,
+    mdns: ServiceDaemon,
+    /// Noms complets des services annoncés, pour les retirer à la fermeture.
+    services: Vec<String>,
+}
+
+impl Drop for Handle {
+    /// Annonce le départ de jf : sans cela, l'iPhone garde l'ancienne annonce en cache
+    /// (plus d'une heure) et peut viser un appareil qui n'existe plus.
+    fn drop(&mut self) {
+        for service in &self.services {
+            if let Ok(done) = self.mdns.unregister(service) {
+                let _ = done.recv_timeout(Duration::from_millis(500));
+            }
+        }
+        let _ = self.mdns.shutdown();
+        trace!("annonce retirée");
+    }
 }
 
 impl Handle {
@@ -262,7 +277,6 @@ pub fn start(
         name: name.to_owned(),
         identity,
         directory,
-        companion_port: ports[1],
         pairing: Mutex::default(),
         notice: Mutex::default(),
         remotes: Mutex::default(),
@@ -271,7 +285,7 @@ pub fn start(
         commands,
         ui,
     });
-    let mdns = advertise(&shared, ip, ports).map_err(|error| format!("Bonjour : {error}"))?;
+    let (mdns, services) = advertise(&shared, ip, ports).map_err(|error| format!("Bonjour : {error}"))?;
     trace!("annoncé sur {ip}, ports {ports:?}");
 
     std::thread::spawn(move || probe_endpoint(media, false));
@@ -291,7 +305,7 @@ pub fn start(
             });
         }
     });
-    Ok(Handle { shared, _mdns: mdns })
+    Ok(Handle { shared, mdns, services })
 }
 
 /// Service Bonjour : type, port et enregistrement TXT.
@@ -302,7 +316,7 @@ fn advertise(
     shared: &Shared,
     ip: Ipv4Addr,
     [media, companion, airplay]: [u16; 3],
-) -> Result<ServiceDaemon, mdns_sd::Error> {
+) -> Result<(ServiceDaemon, Vec<String>), mdns_sd::Error> {
     let identity = &shared.identity;
     let mac = identity.mac.map(|byte| format!("{byte:02X}")).join(":");
     let mac_id = mac.replace(':', "");
@@ -362,10 +376,13 @@ fn advertise(
     ];
     let daemon = ServiceDaemon::new()?;
     let host = format!("jf-{}.local.", mac_id.to_lowercase());
+    let mut services = Vec::new();
     for (kind, port, txt) in records {
-        daemon.register(ServiceInfo::new(kind, name, &host, IpAddr::V4(ip), port, &txt[..])?)?;
+        let info = ServiceInfo::new(kind, name, &host, IpAddr::V4(ip), port, &txt[..])?;
+        services.push(info.get_fullname().to_owned());
+        daemon.register(info)?;
     }
-    Ok(daemon)
+    Ok((daemon, services))
 }
 
 /// iOS sonde aussi les services MediaRemote et AirPlay : une réponse minimale suffit,
@@ -377,6 +394,8 @@ fn probe_endpoint(listener: TcpListener, airplay: bool) {
 }
 
 fn answer_probe(mut stream: TcpStream, airplay: bool) {
+    let peer = stream.peer_addr().map(|address| address.to_string()).unwrap_or_default();
+    trace!("{peer} : sonde {}", if airplay { "AirPlay" } else { "MediaRemote" });
     let mut buffer = [0u8; 1024];
     let wait = if airplay { 3 } else { 60 };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(wait)));

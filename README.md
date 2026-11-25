@@ -145,7 +145,11 @@ Pendant la lecture, l'interface se pilote aux flèches :
   puis arrête la lecture (la position est conservée).
 
 Seuls les iPhone appairés avec le code affiché à l'écran peuvent piloter jf ; leurs clés
-sont dans `~/.config/jf/apple-tv/`. Supprimer ce dossier oublie tous les iPhone.
+sont dans `~/.config/jf/apple-tv/`. `jf --reset-apple-tv` (jf fermé) oublie tous les
+iPhone et donne à jf une nouvelle identité : l'iPhone le voit comme un nouvel appareil,
+ce qui règle aussi les connexions qui restent bloquées.
+
+En cas de problème, `JF_LOG=1 jf 2> jf-apple-tv.log` enregistre tout l'échange.
 Le pare-feu doit laisser passer Bonjour (UDP 5353) et les ports TCP 49152 à 49154.
 
 Le protocole (Companion Link) a été reconstitué par [pyatv](https://pyatv.dev) ; le codec

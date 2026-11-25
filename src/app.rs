@@ -750,5 +750,7 @@ impl eframe::App for App {
         // Enregistre la position en cours, puis libère le rendu tant que le contexte OpenGL existe.
         self.player.stop();
         self.player.mpv.free_renderer();
+        // Retire l'annonce Apple TV du réseau.
+        self.apple_tv = None;
     }
 }

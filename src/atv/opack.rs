@@ -482,7 +482,11 @@ fn unpack_inner<'a>(
         m => return Err(err(&format!("unknown OPACK marker {m:#x}"))),
     };
 
-    if add_ref && !objects.contains(&value) {
+    // Comme l'encodeur d'Apple, on ne référence pas les objets d'un seul octet (chaîne ou
+    // données vides) : iOS envoie `"myriadTrialTreatment": ""` dans `_systemInfo`, et les
+    // compter décalait toutes les références suivantes (le nom du message devenait illisible).
+    let encoded = data.len() - remaining.len();
+    if add_ref && encoded > 1 && !objects.contains(&value) {
         spend(budget, std::mem::size_of::<Value>() + allocated(&value))?;
         objects.push(value.clone());
     }
@@ -500,4 +504,26 @@ fn allocated(value: &Value) -> usize {
 fn spend(budget: &mut usize, amount: usize) -> Result<(), OpackError> {
     *budget = budget.checked_sub(amount).ok_or_else(|| OpackError("OPACK allocation limit exceeded".into()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Une chaîne vide avant une référence ne doit pas la décaler (bug vu avec iOS).
+    #[test]
+    fn empty_string_does_not_shift_references() {
+        let message = Value::dict(vec![
+            Value::kv("myriadTrialTreatment", Value::str("")),
+            Value::kv("_i", Value::str("_systemInfo")),
+            Value::kv("copie", Value::str("_systemInfo")),
+        ]);
+        let packed = pack(&message);
+        // L'encodeur a bien remplacé la seconde occurrence par une référence.
+        assert!(packed.len() < 60);
+        let (decoded, rest) = unpack(&packed).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(decoded.get("_i").and_then(Value::as_str), Some("_systemInfo"));
+        assert_eq!(decoded, message);
+    }
 }
