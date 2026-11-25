@@ -96,6 +96,27 @@ impl Menu {
     }
 }
 
+/// Code à saisir sur l'iPhone pour l'appairer comme télécommande.
+pub fn pairing_code(ctx: &egui::Context, code: u32) {
+    let screen = ctx.content_rect();
+    let rem = theme::rem(screen);
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("pairing"));
+    let painter = ctx.layer_painter(layer);
+    painter.rect_filled(screen, 0.0, Color32::from_black_alpha(170));
+    let panel = Rect::from_center_size(screen.center(), Vec2::new(26.0, 15.0) * rem);
+    painter.rect_filled(panel, theme::corner(0.6 * rem), theme::PANEL);
+    let lines = [
+        ("Jumelage de la télécommande", rem, theme::DIM, egui::FontFamily::Proportional),
+        (&*format!("{code:04}"), 4.0 * rem, theme::TEXT, theme::semibold()),
+        ("Saisissez ce code sur l'iPhone.", rem, theme::DIM, egui::FontFamily::Proportional),
+    ];
+    let mut y = panel.top() + 2.0 * rem;
+    for (text, size, color, family) in lines {
+        let text = Text { family, centered: true, ..Text::line(text, size, color, panel.width() - 2.0 * rem) };
+        y += text.paint(&painter, Pos2::new(panel.center().x, y)) + 0.8 * rem;
+    }
+}
+
 /// Message bref en bas de l'écran.
 pub fn toast(ctx: &egui::Context, message: &str) {
     let screen = ctx.content_rect();

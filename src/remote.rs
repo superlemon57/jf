@@ -146,9 +146,22 @@ fn post(path: &str, body: &Value, context: &Context) -> Option<Value> {
 }
 
 /// Règle le volume du système via PipeWire et renvoie le nouveau niveau (0 à 1).
-fn change_volume(delta: f64) -> Option<f64> {
+pub(crate) fn change_volume(delta: f64) -> Option<f64> {
     let step = format!("{:.0}%{}", delta.abs().min(0.5) * 100.0, if delta < 0.0 { '-' } else { '+' });
     Process::new("wpctl").args(["set-volume", "--limit", "1.0", SINK, &step]).status().ok()?;
+    volume()
+}
+
+/// Volume du système, de 0 à 1.
+pub(crate) fn volume() -> Option<f64> {
     let output = Process::new("wpctl").args(["get-volume", SINK]).output().ok()?;
     String::from_utf8_lossy(&output.stdout).split_whitespace().nth(1)?.parse().ok()
+}
+
+pub(crate) fn set_volume(volume: f64) {
+    let _ = Process::new("wpctl").args(["set-volume", "--limit", "1.0", SINK, &format!("{volume:.3}")]).status();
+}
+
+pub(crate) fn toggle_mute() {
+    let _ = Process::new("wpctl").args(["set-mute", SINK, "toggle"]).status();
 }

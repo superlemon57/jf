@@ -76,6 +76,8 @@ pub struct App {
     /// Position des sous-titres réglée par l'utilisateur, pendant qu'ils sont remontés.
     raised_subtitles: Option<f64>,
     remote_state: remote::Shared,
+    /// jf vu comme une Apple TV par la télécommande d'iOS.
+    apple_tv: Option<crate::atv::Handle>,
     remote_inbox: Receiver<remote::Command>,
 
     login: Login,
@@ -120,6 +122,7 @@ impl App {
             raised_subtitles: None,
             remote_state: remote_state.clone(),
             remote_inbox,
+            apple_tv: None,
             login: Login::new(&config.server),
             login_attempt: Arc::default(),
             pages: Vec::new(),
@@ -134,6 +137,20 @@ impl App {
             state_published: Instant::now(),
             config,
         };
+        if !app.config.apple_tv.is_empty() {
+            let directory = config::config_dir().join("apple-tv");
+            let started = crate::atv::start(
+                &app.config.apple_tv,
+                directory,
+                remote_state.clone(),
+                remote_sender.clone(),
+                ctx.clone(),
+            );
+            match started {
+                Ok(handle) => app.apple_tv = Some(handle),
+                Err(error) => app.show_toast(format!("Télécommande Apple TV indisponible : {error}")),
+            }
+        }
         if !app.config.remote.is_empty() {
             if let Err(error) = remote::start(&app.config.remote, remote_state, remote_sender, ctx.clone()) {
                 app.show_toast(format!("Télécommande indisponible sur {} : {error}", app.config.remote));
@@ -396,6 +413,11 @@ impl App {
                         }
                     }
                     "stop" => self.stop_playback(),
+                    "home" => {
+                        self.stop_playback();
+                        self.pages.truncate(1);
+                        self.refresh_if_stale();
+                    }
                     _ => {}
                 },
                 remote::Command::Key(key) => {
@@ -725,6 +747,13 @@ impl eframe::App for App {
             }
         });
 
+        if let Some(notice) = self.apple_tv.as_ref().and_then(crate::atv::Handle::take_notice) {
+            self.show_toast(notice);
+        }
+        if let Some((code, left)) = self.apple_tv.as_ref().and_then(crate::atv::Handle::pairing_code) {
+            overlay::pairing_code(ctx, code);
+            ctx.request_repaint_after(left.min(Duration::from_secs(1)));
+        }
         if let Some((message, since)) = &self.toast {
             if since.elapsed() < TOAST_DURATION {
                 overlay::toast(ctx, message);

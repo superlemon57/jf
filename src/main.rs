@@ -1,6 +1,7 @@
 //! jf — client Jellyfin natif pour le salon, avec mpv intégré.
 
 mod app;
+mod atv;
 mod config;
 mod images;
 mod jellyfin;

@@ -9,7 +9,8 @@ pilotée au clavier ou à la télécommande, avec mpv intégré dans la fenêtre
 - « Passer l'intro » et compte à rebours vers l'épisode suivant
 - Enchaînement des épisodes, lecture aléatoire, marquage « vu »
 - Position de lecture synchronisée avec le serveur
-- `remote/` : **jf Remote**, la télécommande pour iPhone
+- Pilotable par la télécommande Apple TV d'iOS (Centre de contrôle), sans rien installer
+- `remote/` : **jf Remote**, une télécommande plus complète pour iPhone
 
 Écrit en Rust avec [egui](https://github.com/emilk/egui). Linux, Wayland ou X11.
 Serveur Jellyfin 10.9 ou plus récent.
@@ -104,13 +105,42 @@ Pour personnaliser le lecteur, déposez vos fichiers dans `~/.config/jf/mpv/` :
 
 ## Configuration
 
-`~/.config/jf/config.json` contient la session et un réglage :
+`~/.config/jf/config.json` contient la session et deux réglages :
 
 | Clé | Rôle |
 |---|---|
 | `remote` | adresse d'écoute de l'API télécommande (`0.0.0.0:8097` par défaut, `""` pour la désactiver) |
+| `apple_tv` | nom affiché dans la télécommande Apple TV d'iOS (`jf` par défaut, `""` pour la désactiver) |
 
 Les images sont mises en cache dans `~/.cache/jf/`.
+
+## Télécommande Apple TV d'iOS
+
+jf se présente sur le réseau local comme une Apple TV : la télécommande du Centre de
+contrôle de l'iPhone (et l'app « Remote ») le trouve sous le nom `jf`.
+
+1. Sur l'iPhone, ouvrez la télécommande Apple TV et choisissez `jf`.
+2. jf affiche un code à quatre chiffres : saisissez-le sur l'iPhone.
+
+| Sur l'iPhone | Dans jf |
+|---|---|
+| glisser, flèches | se déplacer ; en lecture, ±10 s (gauche/droite) et ±60 s (haut/bas) |
+| toucher, bouton central | valider ; en lecture, « Passer l'intro », « Épisode suivant » ou pause |
+| retour | page précédente ; en lecture, écarter le compte à rebours, sinon arrêter |
+| TV | accueil (arrête la lecture) |
+| lecture/pause, ±10 s | commandes de lecture |
+| boutons de volume | volume du système |
+| chaîne + / − | élément suivant ou précédent (zapper en TV en direct) |
+| sous-titres | activer ou couper les sous-titres |
+
+Seuls les iPhone appairés avec le code affiché à l'écran peuvent piloter jf ; leurs clés
+sont dans `~/.config/jf/apple-tv/`. Supprimer ce dossier oublie tous les iPhone.
+Le pare-feu doit laisser passer Bonjour (UDP 5353) et les ports TCP 49152 à 49154.
+
+Le protocole (Companion Link) a été reconstitué par [pyatv](https://pyatv.dev) ; le codec
+OPACK, l'appairage SRP et le chiffrement viennent de
+[myRemote](https://github.com/oseanstudio/myRemote), sous licence MIT
+(`LICENSES/myRemote-MIT.txt`).
 
 ## Télécommande
 
@@ -162,4 +192,5 @@ cargo run
 | `src/player.rs` | file de lecture et suivi de position |
 | `src/images.rs` | chargement et cache des images |
 | `src/remote.rs` | API télécommande |
+| `src/atv/` | jf vu comme une Apple TV par la télécommande d'iOS |
 | `src/ui/` | écrans : navigation, lecture et son interface (`osd.rs`), connexion, menu |
