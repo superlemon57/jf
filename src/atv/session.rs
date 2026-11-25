@@ -37,8 +37,6 @@ const MAX_FRAME: usize = 64 * 1024;
 const REMOTE_SERVICE: &str = "com.apple.tvremoteservices";
 /// Avant vérification, une connexion n'a que le temps d'un appairage.
 const UNVERIFIED_LIMIT: Duration = Duration::from_secs(180);
-/// Connexion vérifiée sans télécommande ouverte (sonde de l'iPhone en arrière-plan).
-const BACKGROUND_LIMIT: Duration = Duration::from_secs(90);
 const IDLE_LIMIT: Duration = Duration::from_secs(3600);
 
 // Pavé tactile, en unités d'une surface de 1000 × 1000.
@@ -207,13 +205,6 @@ fn verification_cipher(shared: &[u8; 32]) -> Result<CompanionCipher> {
     CompanionCipher::new(&key, &key, 8)
 }
 
-/// UUID stable dérivé de l'identité, pour les identifiants annexes d'une Apple TV.
-fn derived_uuid(identity: &super::Identity, label: &str) -> String {
-    let hash = Sha256::new().chain_update(identity.private_key).chain_update(label.as_bytes()).finalize();
-    let hex = super::hex_upper(&hash[..16]);
-    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
-}
-
 fn awake() -> Value {
     Value::dict(vec![Value::kv("state", Value::Int(3))])
 }
@@ -250,11 +241,8 @@ impl Session {
                 self.handle_frame(header, &payload)?;
             }
             self.repeat();
-            let (limit, since) = match (self.cipher.is_some(), self.remote_open) {
-                (false, _) => (UNVERIFIED_LIMIT, self.accepted),
-                (true, false) => (BACKGROUND_LIMIT, self.activity),
-                (true, true) => (IDLE_LIMIT, self.activity),
-            };
+            let (limit, since) =
+                if self.cipher.is_some() { (IDLE_LIMIT, self.activity) } else { (UNVERIFIED_LIMIT, self.accepted) };
             if since.elapsed() > limit {
                 return Err("connexion inactive".into());
             }
@@ -526,13 +514,16 @@ impl Session {
         let xid = message.get("_x").and_then(Value::as_int);
         let content = message.get("_c").unwrap_or(&Value::Null);
         trace!("message {:?} ({}) : {content}", self.identifier, if is_event { "événement" } else { "requête" });
-        // Tout message reçoit une réponse, événements compris : la télécommande d'iOS
-        // ferme la session si certaines restent sans réponse.
-        let reply = |session: &mut Self| session.respond(xid, None, 0);
-        if matches!(
-            self.identifier.as_deref(),
-            Some("_sessionStart" | "TVRCSessionStart" | "_hidC" | "HIDCommand" | "_hidT" | "HIDTouch")
-        ) {
+        let reply = |session: &mut Self| if is_event { Ok(()) } else { session.respond(xid, None, 0) };
+        // Seule l'ouverture de la télécommande (ou une commande) fait de cette connexion
+        // celle de l'iPhone : ses autres connexions (sondes, présence) ne la remplacent pas.
+        let remote_service = content.get("_srvT").is_none_or(|service| service.as_str() == Some(REMOTE_SERVICE));
+        let claims = match self.identifier.as_deref() {
+            Some("_sessionStart") => remote_service,
+            Some("TVRCSessionStart" | "_hidC" | "HIDCommand" | "_hidT" | "HIDTouch") => true,
+            _ => false,
+        };
+        if claims {
             self.claim();
         }
 
@@ -593,7 +584,6 @@ impl Session {
                 reply(self)?;
             }
             Some("_interest") => {
-                reply(self)?;
                 if let Some(Value::Array(events)) = content.get("_regEvents") {
                     let events: Vec<String> = events.iter().filter_map(Value::as_str).map(str::to_owned).collect();
                     for event in events {
@@ -632,7 +622,8 @@ impl Session {
                 ]);
                 self.respond(xid, Some(content), 2)?;
             }
-            _ => reply(self)?,
+            _ if xid.is_some() && !is_event => self.respond(xid, None, 0)?,
+            _ => {}
         }
         Ok(())
     }
@@ -652,32 +643,6 @@ impl Session {
             Value::kv("model", Value::str(DEVICE_MODEL)),
             Value::kv("name", Value::str(&self.shared.name)),
             Value::kv("_lP", Value::Int(self.shared.companion_port.into())),
-            // Champs d'une vraie Apple TV, d'après windows-apple-remote (iOS 27).
-            Value::kv("_idsID", Value::str(&derived_uuid(identity, "ids"))),
-            Value::kv("_mRtID", Value::str(&identity.identifier)),
-            Value::kv("_bf", Value::Int(1920)),
-            Value::kv("_clFl", Value::Int(128)),
-            Value::kv("_msSt", Value::Int(1)),
-            Value::kv("_msRo", Value::Int(1)),
-            Value::kv("_dCapF", Value::Int(1)),
-            Value::kv(
-                "_siriInfo",
-                Value::dict(vec![
-                    Value::kv("collectorElectionVersion", Value::Double(1.0)),
-                    Value::kv(
-                        "peerData",
-                        Value::dict(vec![
-                            Value::kv("productType", Value::str(DEVICE_MODEL)),
-                            Value::kv("userInterfaceIdiom", Value::str("ZEUS")),
-                            Value::kv("userAssignedDeviceName", Value::str(&self.shared.name)),
-                            Value::kv("assistantIdentifier", Value::str(&derived_uuid(identity, "assistant"))),
-                            Value::kv("sharedUserIdentifier", Value::str(&derived_uuid(identity, "user"))),
-                            Value::kv("isLocationSharingDevice", Value::Bool(false)),
-                            Value::kv("isSiriCloudSyncEnabled", Value::Bool(false)),
-                        ]),
-                    ),
-                ]),
-            ),
         ])
     }
 
