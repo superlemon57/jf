@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -138,26 +138,140 @@ pub struct Shared {
     pub(crate) state: remote::Shared,
     commands: Sender<remote::Command>,
     ui: egui::Context,
+    links: Links,
+}
+
+/// Connexions ouvertes, pour libérer celles qu'iOS laisse sans télécommande.
+///
+/// iOS (rapportd, sharingd) ouvre des connexions de fond qui ne portent jamais de
+/// télécommande ; tant qu'une telle connexion reste ouverte, la télécommande de l'iPhone
+/// attend dessus et reste sur « Connexion » (journaux du 25/11/2026, et atv-core).
+/// Une connexion qui sert la télécommande n'est jamais fermée par une autre.
+#[derive(Default)]
+pub(crate) struct Links {
+    next: AtomicU64,
+    open: Mutex<Vec<Link>>,
+}
+
+struct Link {
+    id: u64,
+    peer: IpAddr,
+    controller: Option<Vec<u8>>,
+    state: Arc<LinkState>,
+}
+
+/// État partagé d'une connexion : utilisée par la télécommande, ou à fermer.
+#[derive(Default)]
+pub(crate) struct LinkState {
+    pub(crate) in_use: AtomicBool,
+    pub(crate) close: AtomicBool,
+}
+
+impl Links {
+    /// Enregistre une nouvelle connexion ; les connexions inutilisées du même appareil
+    /// sont fermées, l'iPhone repartant de la nouvelle.
+    pub(crate) fn open(&self, peer: IpAddr) -> (u64, Arc<LinkState>) {
+        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        let state = Arc::new(LinkState::default());
+        let mut open = self.open.lock().unwrap();
+        for link in open.iter().filter(|link| link.peer == peer) {
+            link.release_if_idle(id);
+        }
+        open.push(Link { id, peer, controller: None, state: state.clone() });
+        (id, state)
+    }
+
+    /// L'iPhone `controller` s'est vérifié sur la connexion `id` : ses autres connexions
+    /// inutilisées sont fermées (une Apple TV ne garde qu'une connexion par appairage).
+    pub(crate) fn verified(&self, id: u64, controller: &[u8]) {
+        let mut open = self.open.lock().unwrap();
+        for link in open.iter().filter(|link| link.id != id && link.controller.as_deref() == Some(controller)) {
+            link.release_if_idle(id);
+        }
+        if let Some(link) = open.iter_mut().find(|link| link.id == id) {
+            link.controller = Some(controller.to_vec());
+        }
+    }
+
+    pub(crate) fn close(&self, id: u64) {
+        self.open.lock().unwrap().retain(|link| link.id != id);
+    }
+}
+
+impl Link {
+    fn release_if_idle(&self, newer: u64) {
+        if !self.state.in_use.load(Ordering::SeqCst) && !self.state.close.swap(true, Ordering::SeqCst) {
+            trace!("connexion n° {} inutilisée, fermée au profit de la n° {newer}", self.id);
+        }
+    }
 }
 
 pub struct Handle {
     shared: Arc<Shared>,
-    mdns: ServiceDaemon,
-    /// Noms complets des services annoncés, pour les retirer à la fermeture.
+    advert: Arc<Mutex<Option<Advert>>>,
+    stop: Arc<AtomicBool>,
+}
+
+/// Annonce Bonjour en cours, sur une adresse du réseau local.
+struct Advert {
+    ip: Ipv4Addr,
+    daemon: ServiceDaemon,
+    /// Noms complets des services annoncés, pour les retirer.
     services: Vec<String>,
 }
 
-impl Drop for Handle {
-    /// Annonce le départ de jf : sans cela, l'iPhone garde l'ancienne annonce en cache
-    /// (plus d'une heure) et peut viser un appareil qui n'existe plus.
-    fn drop(&mut self) {
+impl Advert {
+    /// Retire l'annonce : sans cela, l'iPhone garde l'ancienne en cache (plus d'une heure)
+    /// et peut viser un appareil ou une adresse qui n'existe plus.
+    fn withdraw(self) {
         for service in &self.services {
-            if let Ok(done) = self.mdns.unregister(service) {
+            if let Ok(done) = self.daemon.unregister(service) {
                 let _ = done.recv_timeout(Duration::from_millis(500));
             }
         }
-        let _ = self.mdns.shutdown();
-        trace!("annonce retirée");
+        let _ = self.daemon.shutdown();
+        trace!("annonce retirée de {}", self.ip);
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(advert) = self.advert.lock().unwrap().take() {
+            advert.withdraw();
+        }
+    }
+}
+
+/// Intervalle de vérification de l'adresse locale (changement de réseau, bail DHCP).
+const ADDRESS_CHECK: Duration = Duration::from_secs(15);
+
+/// Tient l'annonce à jour : elle suit l'adresse locale, réapparaît quand le réseau revient
+/// et disparaît quand il n'y en a plus.
+fn keep_advertised(shared: Arc<Shared>, port: u16, advert: Arc<Mutex<Option<Advert>>>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::SeqCst) {
+        let ip = local_ip();
+        let current = advert.lock().unwrap().as_ref().map(|advert| advert.ip);
+        if ip != current {
+            if let Some(old) = advert.lock().unwrap().take() {
+                old.withdraw();
+            }
+            if let Some(ip) = ip {
+                match advertise(&shared, ip, port) {
+                    Ok((daemon, services)) => {
+                        trace!("annoncé sur {ip}, port {port}");
+                        *advert.lock().unwrap() = Some(Advert { ip, daemon, services });
+                    }
+                    Err(error) => trace!("annonce Bonjour impossible sur {ip} : {error}"),
+                }
+            } else {
+                trace!("aucune adresse sur le réseau local, annonce suspendue");
+            }
+        }
+        let started = Instant::now();
+        while started.elapsed() < ADDRESS_CHECK && !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
     }
 }
 
@@ -277,13 +391,55 @@ fn load_identity(directory: &Path) -> io::Result<Identity> {
     Ok(Identity { private_key, identifier, mac })
 }
 
+/// Interfaces virtuelles (VPN, conteneurs, machines virtuelles) que l'iPhone ne voit pas.
+const VIRTUAL_INTERFACES: [&str; 20] = [
+    "lo",
+    "docker",
+    "br-",
+    "veth",
+    "virbr",
+    "vmnet",
+    "vboxnet",
+    "tailscale",
+    "tun",
+    "tap",
+    "wg",
+    "utun",
+    "zt",
+    "mullvad",
+    "nordlynx",
+    "proton",
+    "podman",
+    "cni",
+    "incus",
+    "lxc",
+];
+
+/// Adresse du PC sur le réseau local (Wi-Fi ou Ethernet), celle que l'iPhone peut joindre.
+/// La route par défaut passe parfois par un VPN : on retient alors l'adresse d'une vraie
+/// carte réseau.
 fn local_ip() -> Option<Ipv4Addr> {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    // Aucun paquet n'est envoyé : la connexion choisit seulement l'interface de sortie.
-    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
-    match socket.local_addr().ok()?.ip() {
-        IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
-        _ => None,
+    let lan: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|interface| !VIRTUAL_INTERFACES.iter().any(|prefix| interface.name.starts_with(prefix)))
+        .filter_map(|interface| match interface.ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() => Some(ip),
+            _ => None,
+        })
+        .collect();
+    let routed = (|| {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        // Aucun paquet n'est envoyé : la connexion choisit seulement l'interface de sortie.
+        socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+        match socket.local_addr().ok()?.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        }
+    })();
+    match routed {
+        Some(ip) if lan.contains(&ip) => Some(ip),
+        _ => lan.iter().find(|ip| ip.is_private()).or(lan.first()).copied(),
     }
 }
 
@@ -300,7 +456,6 @@ pub fn start(
     ui: egui::Context,
 ) -> Result<Handle, String> {
     open_log();
-    let ip = local_ip().ok_or("aucune adresse sur le réseau local")?;
     let identity = load_identity(&directory).map_err(|error| error.to_string())?;
     let companion = bind(PORT).map_err(|error| error.to_string())?;
     let port = companion.local_addr().map(|address| address.port()).map_err(|error| error.to_string())?;
@@ -314,9 +469,26 @@ pub fn start(
         state,
         commands,
         ui,
+        links: Links::default(),
     });
-    let (mdns, services) = advertise(&shared, ip, port).map_err(|error| format!("Bonjour : {error}"))?;
-    trace!("annoncé sur {ip}, port {port}");
+    // Première annonce tout de suite, pour signaler une erreur au lancement.
+    let first = match local_ip() {
+        Some(ip) => {
+            let (daemon, services) = advertise(&shared, ip, port).map_err(|error| format!("Bonjour : {error}"))?;
+            trace!("annoncé sur {ip}, port {port}");
+            Some(Advert { ip, daemon, services })
+        }
+        None => {
+            trace!("aucune adresse sur le réseau local, annonce en attente");
+            None
+        }
+    };
+    let advert = Arc::new(Mutex::new(first));
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let (shared, advert, stop) = (shared.clone(), advert.clone(), stop.clone());
+        std::thread::spawn(move || keep_advertised(shared, port, advert, stop));
+    }
     let connections = Arc::new(AtomicUsize::new(0));
     let session_shared = shared.clone();
     std::thread::spawn(move || {
@@ -332,7 +504,7 @@ pub fn start(
             });
         }
     });
-    Ok(Handle { shared, mdns, services })
+    Ok(Handle { shared, advert, stop })
 }
 
 /// Annonce le service Companion Link d'une Apple TV, seulement sur l'interface du réseau

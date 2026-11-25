@@ -156,7 +156,11 @@ Le pare-feu doit laisser passer Bonjour (UDP 5353) et le port TCP 49153.
 Le protocole (Companion Link) a été reconstitué par [pyatv](https://pyatv.dev) ; le codec
 OPACK, l'appairage SRP et le chiffrement viennent de
 [myRemote](https://github.com/oseanstudio/myRemote), sous licence MIT
-(`LICENSES/myRemote-MIT.txt`).
+(`LICENSES/myRemote-MIT.txt`). Le comportement face à iOS 26/27 (fiche `_systemInfo`,
+état poussé après elle, connexions de fond d'iOS libérées, session chiffrée dès
+l'appairage) suit [atv-core](https://github.com/corvofeng/atv-core),
+[windows-apple-remote](https://github.com/aryakvn/windows-apple-remote) et
+[atvr4samsung](https://github.com/vb3/atvr4samsung).
 
 ## Développement
 

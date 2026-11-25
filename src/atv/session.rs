@@ -3,6 +3,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,12 @@ const REMOTE_SERVICE: &str = "com.apple.tvremoteservices";
 /// Avant vérification, une connexion n'a que le temps d'un appairage.
 const UNVERIFIED_LIMIT: Duration = Duration::from_secs(180);
 const IDLE_LIMIT: Duration = Duration::from_secs(3600);
+/// Après la vérification, délai pour ouvrir la télécommande avant de libérer la connexion
+/// (atv-core) : la télécommande d'iOS envoie `_sessionStart` en quelques millisecondes.
+const VERIFIED_GRACE: Duration = Duration::from_secs(3);
+const SYSTEM_INFO_GRACE: Duration = Duration::from_millis(2500);
+/// Connexion de fond d'iOS (bit de poids fort de `_x`) : elle ne porte jamais de télécommande.
+const PROBE_GRACE: Duration = Duration::from_secs(1);
 
 // Pavé tactile, en unités d'une surface de 1000 × 1000.
 const SURFACE: f64 = 1000.0;
@@ -138,6 +145,11 @@ struct Session {
     seeking: Option<Seeking>,
     accepted: Instant,
     activity: Instant,
+    /// Connexion dans le registre partagé, et délai avant de la libérer si la
+    /// télécommande ne s'y ouvre pas.
+    link: u64,
+    link_state: Arc<super::LinkState>,
+    deadline: Option<Instant>,
 }
 
 pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
@@ -148,8 +160,10 @@ pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
         .with_interval(Duration::from_secs(3))
         .with_retries(8);
     let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
-    let peer = stream.peer_addr().map(|address| address.to_string()).unwrap_or_default();
-    trace!("{peer} : connexion");
+    let Ok(address) = stream.peer_addr() else { return };
+    let peer = address.to_string();
+    let (link, link_state) = shared.links.open(address.ip());
+    trace!("{peer} : connexion n° {link}");
     let mut session = Session {
         buffer: Vec::new(),
         signing: SigningKey::from_bytes(&shared.identity.private_key),
@@ -172,10 +186,14 @@ pub(super) fn serve(stream: TcpStream, shared: Arc<Shared>) {
         seeking: None,
         accepted: Instant::now(),
         activity: Instant::now(),
+        link,
+        link_state,
+        deadline: None,
     };
     if let Err(error) = session.run() {
-        trace!("{peer} : fin ({error})");
+        trace!("{peer} : fin de la connexion n° {link} ({error})");
     }
+    session.shared.links.close(link);
 }
 
 fn field<'a>(value: &'a Value, key: &str) -> Result<&'a [u8]> {
@@ -236,6 +254,12 @@ impl Session {
                 if self.cipher.is_some() { (IDLE_LIMIT, self.activity) } else { (UNVERIFIED_LIMIT, self.accepted) };
             if since.elapsed() > limit {
                 return Err("connexion inactive".into());
+            }
+            if self.link_state.close.load(Ordering::SeqCst) {
+                return Err("remplacée par une connexion plus récente".into());
+            }
+            if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) && !self.in_use() {
+                return Err("aucune télécommande ouverte, connexion libérée".into());
             }
             if self.remote_open {
                 self.publish(false)?;
@@ -365,6 +389,8 @@ impl Session {
             trace!("appairage refusé : attente après des codes faux");
             return self.auth_reply(PS_NEXT, &[(tags::SEQ_NO, &[2]), (tags::ERROR, &[6])]);
         };
+        // Pendant la saisie du code, une autre connexion de l'iPhone ne doit pas la fermer.
+        self.link_state.in_use.store(true, Ordering::SeqCst);
         let srp = SrpServer::new(pin, &rand::random::<[u8; 32]>());
         let reply = tlv::write(&[
             (tags::SEQ_NO, &[2]),
@@ -431,7 +457,13 @@ impl Session {
         ]);
         let encrypted = cipher.encrypt(&reply, None, Some(b"PS-Msg06"))?;
         self.shared.trust(generation, id, public)?;
-        self.auth_reply(PS_NEXT, &[(tags::SEQ_NO, &[6]), (tags::ENCRYPTED_DATA, &encrypted)])
+        self.auth_reply(PS_NEXT, &[(tags::SEQ_NO, &[6]), (tags::ENCRYPTED_DATA, &encrypted)])?;
+        // iOS enchaîne sur la même connexion, chiffrée avec des clés tirées de l'échange du
+        // code (comme le serveur de pyatv) : sans cela, ses messages étaient ignorés et la
+        // télécommande attendait 30 s après l'appairage.
+        self.encrypted(id, secret)?;
+        trace!("iPhone appairé, session chiffrée");
+        Ok(())
     }
 
     fn pair_verify_1(&mut self, data: &Tlv) -> Result<()> {
@@ -473,15 +505,43 @@ impl Session {
             trace!("vérification refusée : iPhone inconnu ou signature invalide");
             return self.auth_reply(PV_NEXT, &[(tags::SEQ_NO, &[4]), (tags::ERROR, &[2])]);
         }
+        self.auth_reply(PV_NEXT, &[(tags::SEQ_NO, &[4])])?;
+        self.encrypted(id, &pending.shared)?;
+        trace!("iPhone vérifié, session chiffrée");
+        Ok(())
+    }
+
+    fn in_use(&self) -> bool {
+        self.link_state.in_use.load(Ordering::SeqCst)
+    }
+
+    /// La télécommande utilise cette connexion : elle n'est plus libérée d'office.
+    fn mark_in_use(&mut self) {
+        self.deadline = None;
+        if !self.link_state.in_use.swap(true, Ordering::SeqCst) {
+            trace!("connexion n° {} : télécommande", self.link);
+        }
+    }
+
+    /// Fin de la session (`_sessionStop`) : la connexion redevient libérable par une
+    /// connexion plus récente du même iPhone, sans délai propre.
+    fn mark_idle(&mut self) {
+        self.link_state.in_use.store(false, Ordering::SeqCst);
+    }
+
+    /// Connexion chiffrée avec l'iPhone `id`, après appairage ou vérification.
+    fn encrypted(&mut self, id: &[u8], secret: &[u8]) -> Result<()> {
         let digest = Sha256::new().chain_update(self.shared.identity.identifier.as_bytes()).chain_update(id).finalize();
         self.session_id = u32::from_le_bytes(digest[..4].try_into().expect("4 octets")).max(1);
-        self.auth_reply(PV_NEXT, &[(tags::SEQ_NO, &[4])])?;
         self.cipher = Some(CompanionCipher::new(
-            &hkdf_expand("", "ServerEncrypt-main", &pending.shared),
-            &hkdf_expand("", "ClientEncrypt-main", &pending.shared),
+            &hkdf_expand("", "ServerEncrypt-main", secret),
+            &hkdf_expand("", "ClientEncrypt-main", secret),
             12,
         )?);
-        trace!("iPhone vérifié, session chiffrée");
+        self.shared.links.verified(self.link, id);
+        if !self.in_use() {
+            self.deadline = Some(Instant::now() + VERIFIED_GRACE);
+        }
         Ok(())
     }
 
@@ -506,6 +566,24 @@ impl Session {
             if is_event { "événement" } else { "requête" }
         );
         let reply = |session: &mut Self| if is_event { Ok(()) } else { session.respond(xid, None) };
+        // Ouverture de la télécommande ou commande : la connexion la sert désormais.
+        if matches!(
+            self.identifier.as_deref(),
+            Some(
+                "_sessionStart"
+                    | "TVRCSessionStart"
+                    | "_hidC"
+                    | "HIDCommand"
+                    | "_hidT"
+                    | "HIDTouch"
+                    | "_touchStart"
+                    | "HIDTouchStart"
+                    | "_mcc"
+                    | "MediaControlCommand"
+            )
+        ) {
+            self.mark_in_use();
+        }
 
         match self.identifier.clone().as_deref() {
             Some("_sessionStart") => {
@@ -529,6 +607,9 @@ impl Session {
                 if matches!(name, "_sessionStop" | "TVRCSessionStop") {
                     self.remote_open = false;
                     self.published = None;
+                }
+                if name == "_sessionStop" {
+                    self.mark_idle();
                 }
                 self.respond(xid, None)?;
             }
@@ -582,6 +663,19 @@ impl Session {
             Some("_systemInfo" | "SystemInfo") => {
                 let info = self.system_info();
                 self.respond(xid, Some(info))?;
+                if !self.in_use() {
+                    let probe = xid.is_some_and(|xid| xid & 0x8000_0000 != 0);
+                    if probe {
+                        trace!("connexion n° {} : sonde de fond d'iOS", self.link);
+                    }
+                    self.deadline = Some(Instant::now() + if probe { PROBE_GRACE } else { SYSTEM_INFO_GRACE });
+                }
+                // Une vraie Apple TV pousse aussitôt son état à un iPhone dont la fiche porte
+                // un `_i` (documentation de pyatv), après la réponse et jamais avant (atv-core).
+                if content.get("_i").is_some_and(|value| *value != Value::Null) {
+                    self.event("SystemStatus", awake())?;
+                    self.event("TVSystemStatus", awake())?;
+                }
             }
             Some("FetchAttentionState") => self.respond(xid, Some(awake()))?,
             Some("FetchMediaControlStatus") => {
