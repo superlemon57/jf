@@ -104,8 +104,8 @@ impl Menu {
     }
 }
 
-/// Code to enter on the iPhone to pair it as a remote.
-pub fn pairing_code(ctx: &egui::Context, code: u32) {
+/// Code to enter on the phone to pair it as a remote; `hint` says where.
+pub fn pairing_code(ctx: &egui::Context, code: &str, hint: &str) {
     let screen = ctx.content_rect();
     let rem = theme::rem(screen);
     let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("pairing"));
@@ -115,13 +115,8 @@ pub fn pairing_code(ctx: &egui::Context, code: u32) {
     painter.rect_filled(panel, theme::corner(0.6 * rem), theme::PANEL);
     let lines = [
         (t("Pair the remote", "Jumelage de la télécommande"), rem, theme::DIM, egui::FontFamily::Proportional),
-        (&*format!("{code:04}"), 4.0 * rem, theme::TEXT, theme::semibold()),
-        (
-            t("Enter this code on the iPhone.", "Saisissez ce code sur l'iPhone."),
-            rem,
-            theme::DIM,
-            egui::FontFamily::Proportional,
-        ),
+        (code, 4.0 * rem, theme::TEXT, theme::semibold()),
+        (hint, rem, theme::DIM, egui::FontFamily::Proportional),
     ];
     let mut y = panel.top() + 2.0 * rem;
     for (text, size, color, family) in lines {

@@ -17,6 +17,11 @@ abstraction or a new setting, and explain in the pull request what you tested an
 - `src/jellyfin.rs`: Jellyfin API client; `src/player.rs`: queue and playback.
 - `src/atv/`: the device emulated for the iOS Apple TV remote (Companion Link: Bonjour,
   pairing, encrypted session).
+- `src/androidtv/`: the device emulated for the Android TV remote (TLS, "Polo" pairing on
+  port 6467, remote on port 6466, Protocol Buffers written by hand in `proto.rs`).
+- `src/cast.rs`: remote control from other Jellyfin apps (capabilities and the server's
+  WebSocket); `src/lan.rs`: local address, Bonjour announcement and protocol logs shared
+  by the remotes.
 - `src/i18n.rs`: interface strings are written in place in English and French with
   `t("English", "Français")`; English is the default. Only these two languages for now.
 
@@ -34,9 +39,10 @@ nix develop -c cargo build --release   # or plain cargo with the libmpv headers 
 nix build                              # Nix package
 ```
 
-## Apple TV remote
+## Remotes
 
-The iOS side is reverse-engineered and changes between iOS releases. Every exchange
-with the iPhone is logged to `apple-tv.log` in the cache folder (`~/.cache/jf/` on
-Linux): read it before changing the protocol, and check changes on a real iPhone. A
-fake iPhone such as pyatv is useful for regression tests but does not behave like iOS.
+The phone protocols are reverse-engineered and change between releases. Every exchange
+is logged in the cache folder (`~/.cache/jf/` on Linux): `apple-tv.log`,
+`android-tv.log` and `jellyfin-remote.log`. Read them before changing a protocol, and
+check changes on a real phone. Fake phones (pyatv, androidtvremote2) are useful for
+regression tests but do not behave exactly like iOS or the Google TV app.

@@ -126,8 +126,8 @@ jobs:
             <key>CFBundleVersion</key><string>${version}</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
-            <key>NSLocalNetworkUsageDescription</key><string>jf appears as an Apple TV to the iPhone remote.</string>
-            <key>NSBonjourServices</key><array><string>_companion-link._tcp</string></array>
+            <key>NSLocalNetworkUsageDescription</key><string>jf appears as a TV to the iPhone and Android phone remotes.</string>
+            <key>NSBonjourServices</key><array><string>_companion-link._tcp</string><string>_androidtvremote2._tcp</string></array>
           </dict>
           </plist>
           EOF

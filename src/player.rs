@@ -81,6 +81,8 @@ struct Current {
     duration: f64,
     paused: bool,
     last_report: Instant,
+    /// Position and pause state in the last report, to report a seek or a pause at once.
+    reported: (f64, bool),
 }
 
 #[derive(Clone, PartialEq)]
@@ -117,7 +119,8 @@ pub struct Player {
     queue_request: u64,
 }
 
-fn resolve(client: &Client, item: &Item, from_start: bool) -> Result<Stream, String> {
+/// `start`: position in seconds, or `None` to resume where the user stopped.
+fn resolve(client: &Client, item: &Item, start: Option<f64>) -> Result<Stream, String> {
     if item.is_channel() {
         let sources = client.live_sources(&item.id).map_err(|error| error.to_string())?;
         let source =
@@ -173,7 +176,7 @@ fn resolve(client: &Client, item: &Item, from_start: bool) -> Result<Stream, Str
         url: format!("{}/{kind}/{}/stream?static=true&mediaSourceId={source_id}", client.server, full.id),
         header: Some(client.stream_header()),
         user_agent: None,
-        start: if from_start { 0.0 } else { full.resume_seconds() },
+        start: start.unwrap_or_else(|| full.resume_seconds()),
         subtitles: client.external_subtitles(&full.id, &source),
         source_id,
         item: full,
@@ -186,7 +189,12 @@ impl Player {
         // Reports go out from a dedicated thread, in order, without blocking the interface.
         let (reports, inbox) = channel::<(Client, &'static str, Value)>();
         std::thread::spawn(move || {
-            for (client, event, body) in inbox {
+            for (client, event, mut body) in inbox {
+                // System volume, for the remote controls of other Jellyfin apps.
+                if let Some(volume) = crate::remote::volume() {
+                    body["VolumeLevel"] = ((volume * 100.0).round() as i64).into();
+                    body["IsMuted"] = crate::remote::muted().into();
+                }
                 let _ = client.report(event, body);
             }
         });
@@ -216,10 +224,11 @@ impl Player {
         self.resolving || self.current.as_ref().is_some_and(|current| !current.loaded)
     }
 
-    pub fn play(&mut self, queue: Vec<Item>, index: usize, from_start: bool, tasks: &Tasks) {
+    /// `start`: position in seconds in the first item, or `None` to resume it.
+    pub fn play(&mut self, queue: Vec<Item>, index: usize, start: Option<f64>, tasks: &Tasks) {
         self.finish_current();
         self.queue = queue;
-        self.load(index, from_start, tasks);
+        self.load(index, start, tasks);
         self.queue_request += 1;
         // An episode started on its own (Continue watching, Next up, search) goes on with the rest of the series.
         if let ([item], Some(client)) = (self.queue.as_slice(), self.client.clone()) {
@@ -242,13 +251,19 @@ impl Player {
         }
     }
 
-    fn load(&mut self, index: usize, from_start: bool, tasks: &Tasks) {
+    /// Adds items after the current one (`next`) or at the end of the queue.
+    pub fn enqueue(&mut self, items: Vec<Item>, next: bool) {
+        let at = if next { (self.index + 1).min(self.queue.len()) } else { self.queue.len() };
+        self.queue.splice(at..at, items);
+    }
+
+    fn load(&mut self, index: usize, start: Option<f64>, tasks: &Tasks) {
         let (Some(client), Some(item)) = (self.client.clone(), self.queue.get(index).cloned()) else { return };
         self.index = index;
         self.generation += 1;
         self.resolving = true;
         let generation = self.generation;
-        tasks.spawn(move || Message::Resolved(generation, resolve(&client, &item, from_start).map(Box::new)));
+        tasks.spawn(move || Message::Resolved(generation, resolve(&client, &item, start).map(Box::new)));
     }
 
     pub fn on_resolved(&mut self, generation: u64, result: Result<Box<Stream>, String>) -> Outcome {
@@ -282,6 +297,7 @@ impl Player {
             position: stream.start,
             paused: false,
             last_report: Instant::now(),
+            reported: (stream.start, false),
         });
         Outcome::Continue
     }
@@ -291,17 +307,29 @@ impl Player {
         Outcome::Failed(message)
     }
 
+    /// Tells the server what plays: it keeps the position and shows jf among the devices
+    /// playing, which other Jellyfin apps can control.
     fn report(&self, event: &'static str, current: &Current) {
-        // Live TV has no position to keep.
-        let (Some(client), false) = (&self.client, current.live) else { return };
-        let body = json!({
+        let Some(client) = &self.client else { return };
+        let queue: Vec<Value> =
+            self.queue.iter().map(|item| json!({ "Id": item.id, "PlaylistItemId": item.id })).collect();
+        let mut body = json!({
             "ItemId": current.item.id,
             "MediaSourceId": current.source_id,
             "PositionTicks": (current.position.max(0.0) * 1e7) as i64,
             "IsPaused": current.paused,
-            "CanSeek": true,
+            "CanSeek": !current.live,
             "PlayMethod": "DirectPlay",
+            "RepeatMode": "RepeatNone",
+            "NowPlayingQueue": queue,
+            "PlaylistItemId": current.item.id,
         });
+        if let Some(index) = self.stream_index(TrackKind::Audio) {
+            body["AudioStreamIndex"] = index.into();
+        }
+        if let Some(index) = self.stream_index(TrackKind::Subtitle) {
+            body["SubtitleStreamIndex"] = index.into();
+        }
         let _ = self.reports.send((client.clone(), event, body));
     }
 
@@ -333,7 +361,7 @@ impl Player {
             return;
         };
         self.finish_current();
-        self.load(index, false, tasks);
+        self.load(index, None, tasks);
     }
 
     pub fn handle(&mut self, event: Event, tasks: &Tasks) -> Outcome {
@@ -346,6 +374,7 @@ impl Player {
                     let _ = self.mpv.command(&["sub-add", &subtitle.url, "auto", &subtitle.title, &subtitle.language]);
                 }
                 current.last_report = Instant::now();
+                current.reported = (current.position, current.paused);
                 let current = self.current.as_ref().expect("playback in progress");
                 self.report("", current);
             }
@@ -358,7 +387,7 @@ impl Player {
                     self.stop();
                     return Outcome::Ended;
                 }
-                self.load(self.index + 1, false, tasks);
+                self.load(self.index + 1, None, tasks);
             }
             Event::Failed { entry, message } if current.entry == Some(entry) => {
                 return self.fail(format!("{} ({message})", t("playback failed", "lecture impossible")));
@@ -448,8 +477,14 @@ impl Player {
             current.duration = duration;
         }
         current.paused = self.mpv.get_flag("pause").unwrap_or(false);
-        if current.last_report.elapsed().as_secs() >= 10 {
+        // Every 10 seconds, and at once after a pause or a seek.
+        let since = current.last_report.elapsed().as_secs_f64();
+        let (position, paused) = current.reported;
+        let expected = if paused { position } else { position + since };
+        let changed = current.paused != paused || (current.position - expected).abs() > 3.0;
+        if changed || since >= 10.0 {
             current.last_report = Instant::now();
+            current.reported = (current.position, current.paused);
             let current = self.current.as_ref().expect("playback in progress");
             self.report("/Progress", current);
         }
@@ -497,6 +532,41 @@ impl Player {
     pub fn select_track(&self, kind: TrackKind, id: Option<i64>) {
         let property = if kind == TrackKind::Audio { "aid" } else { "sid" };
         self.mpv.set(property, &id.map_or("no".to_owned(), |id| id.to_string()));
+    }
+
+    /// Jellyfin stream indices of the current item, in the order of mpv's track ids
+    /// (1, 2…): embedded streams in file order, then the external subtitles jf added.
+    fn jellyfin_streams(&self, kind: TrackKind) -> Vec<i64> {
+        let Some(current) = &self.current else { return Vec::new() };
+        let wanted = if kind == TrackKind::Audio { "Audio" } else { "Subtitle" };
+        let source = current.item.media_sources.iter().find(|source| source.id == current.source_id);
+        let embedded = source.into_iter().flat_map(|source| &source.media_streams);
+        let mut streams: Vec<i64> =
+            embedded.filter(|stream| stream.kind == wanted && !stream.is_external).map(|stream| stream.index).collect();
+        if kind == TrackKind::Subtitle {
+            streams.extend(current.subtitles.iter().map(|subtitle| subtitle.index));
+        }
+        streams
+    }
+
+    /// Selects a track by its Jellyfin stream index; a negative index hides subtitles.
+    pub fn select_stream(&self, kind: TrackKind, index: i64) {
+        if index < 0 {
+            return self.select_track(kind, None);
+        }
+        if let Some(position) = self.jellyfin_streams(kind).iter().position(|stream| *stream == index) {
+            self.select_track(kind, Some(position as i64 + 1));
+        }
+    }
+
+    /// Jellyfin stream index of the selected track; -1 for subtitles turned off.
+    fn stream_index(&self, kind: TrackKind) -> Option<i64> {
+        let property = if kind == TrackKind::Audio { "aid" } else { "sid" };
+        match self.mpv.get_i64(property) {
+            Some(id) => self.jellyfin_streams(kind).get(usize::try_from(id - 1).ok()?).copied(),
+            None if kind == TrackKind::Subtitle => Some(-1),
+            None => None,
+        }
     }
 
     pub fn item(&self) -> Option<&Item> {

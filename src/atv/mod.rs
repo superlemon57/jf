@@ -13,8 +13,8 @@ mod srp;
 mod tlv;
 
 use std::fs;
-use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, TcpListener, UdpSocket};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -22,11 +22,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
+use mdns_sd::ServiceInfo;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
-use crate::remote;
+use crate::{lan, remote};
 
 const DEVICE_MODEL: &str = "AppleTV14,1";
 const SOURCE_VERSION: &str = "715.2";
@@ -40,42 +40,11 @@ const PAIRING_ATTEMPTS: u8 = 3;
 const PAIRING_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_CONNECTIONS: usize = 32;
 
-/// Protocol log, always written to `apple-tv.log` in the cache folder (the previous one is
-/// kept as `.log.1`) so that a problem with the iPhone leaves a trace without any setup;
-/// `JF_LOG=1` also copies it to standard error.
-static LOG: Mutex<Option<fs::File>> = Mutex::new(None);
-const LOG_LIMIT: u64 = 8 * 1024 * 1024;
-
-fn open_log() {
-    let directory = crate::config::cache_dir();
-    let path = directory.join("apple-tv.log");
-    let _ = fs::create_dir_all(&directory);
-    let _ = fs::rename(&path, directory.join("apple-tv.log.1"));
-    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    let header = format!("jf {} — started at {} (Unix seconds)\n", env!("CARGO_PKG_VERSION"), since.as_secs());
-    if crate::config::write_private(&path, header.as_bytes()).is_ok() {
-        let Ok(file) = fs::OpenOptions::new().append(true).open(&path) else { return };
-        *LOG.lock().unwrap() = Some(file);
-    }
-    clock();
-}
+/// Protocol log: `apple-tv.log` in the cache folder.
+pub(crate) static LOG: lan::Log = lan::Log::new("apple-tv");
 
 pub(crate) fn log_line(line: &str) {
-    let line = format!("[apple-tv {:9.3}] {line}", clock());
-    if std::env::var_os("JF_LOG").is_some_and(|value| value != "0") {
-        eprintln!("{line}");
-    }
-    if let Some(file) = LOG.lock().unwrap().as_mut() {
-        if file.metadata().is_ok_and(|meta| meta.len() < LOG_LIMIT) {
-            let _ = writeln!(file, "{line}");
-        }
-    }
-}
-
-/// Seconds since the log was opened.
-fn clock() -> f64 {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_secs_f64()
+    LOG.line(line);
 }
 
 macro_rules! trace {
@@ -208,71 +177,8 @@ impl Link {
 
 pub struct Handle {
     shared: Arc<Shared>,
-    advert: Arc<Mutex<Option<Advert>>>,
-    stop: Arc<AtomicBool>,
-}
-
-/// Current Bonjour announcement, on a local network address.
-struct Advert {
-    ip: Ipv4Addr,
-    daemon: ServiceDaemon,
-    /// Full names of the announced services, to withdraw them.
-    services: Vec<String>,
-}
-
-impl Advert {
-    /// Withdraws the announcement: otherwise the iPhone keeps the old one cached (over an
-    /// hour) and may aim at a device or an address that no longer exists.
-    fn withdraw(self) {
-        for service in &self.services {
-            if let Ok(done) = self.daemon.unregister(service) {
-                let _ = done.recv_timeout(Duration::from_millis(500));
-            }
-        }
-        let _ = self.daemon.shutdown();
-        trace!("announcement withdrawn from {}", self.ip);
-    }
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(advert) = self.advert.lock().unwrap().take() {
-            advert.withdraw();
-        }
-    }
-}
-
-/// How often the local address is checked (network change, DHCP lease).
-const ADDRESS_CHECK: Duration = Duration::from_secs(15);
-
-/// Keeps the announcement up to date: it follows the local address, comes back with the
-/// network and goes away when there is none.
-fn keep_advertised(shared: Arc<Shared>, port: u16, advert: Arc<Mutex<Option<Advert>>>, stop: Arc<AtomicBool>) {
-    while !stop.load(Ordering::SeqCst) {
-        let ip = local_ip();
-        let current = advert.lock().unwrap().as_ref().map(|advert| advert.ip);
-        if ip != current {
-            if let Some(old) = advert.lock().unwrap().take() {
-                old.withdraw();
-            }
-            if let Some(ip) = ip {
-                match advertise(&shared, ip, port) {
-                    Ok((daemon, services)) => {
-                        trace!("announced on {ip}, port {port}");
-                        *advert.lock().unwrap() = Some(Advert { ip, daemon, services });
-                    }
-                    Err(error) => trace!("Bonjour announcement failed on {ip}: {error}"),
-                }
-            } else {
-                trace!("no local network address, announcement paused");
-            }
-        }
-        let started = Instant::now();
-        while started.elapsed() < ADDRESS_CHECK && !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(250));
-        }
-    }
+    /// Withdrawn from the network when jf closes.
+    _announcement: lan::Announcement,
 }
 
 impl Handle {
@@ -383,58 +289,6 @@ fn load_identity(directory: &Path) -> io::Result<Identity> {
     Ok(Identity { private_key, identifier, mac })
 }
 
-/// Virtual interfaces (VPN, containers, virtual machines) the iPhone cannot see.
-const VIRTUAL_INTERFACES: [&str; 20] = [
-    "lo",
-    "docker",
-    "br-",
-    "veth",
-    "virbr",
-    "vmnet",
-    "vboxnet",
-    "tailscale",
-    "tun",
-    "tap",
-    "wg",
-    "utun",
-    "zt",
-    "mullvad",
-    "nordlynx",
-    "proton",
-    "podman",
-    "cni",
-    "incus",
-    "lxc",
-];
-
-/// Address of the computer on the local network (Wi-Fi or Ethernet), the one the iPhone
-/// can reach. The default route sometimes goes through a VPN: the address of a real
-/// network interface is used then.
-fn local_ip() -> Option<Ipv4Addr> {
-    let lan: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|interface| !VIRTUAL_INTERFACES.iter().any(|prefix| interface.name.starts_with(prefix)))
-        .filter_map(|interface| match interface.ip() {
-            IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() => Some(ip),
-            _ => None,
-        })
-        .collect();
-    let routed = (|| {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-        // No packet is sent: connecting only picks the outgoing interface.
-        socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
-        match socket.local_addr().ok()?.ip() {
-            IpAddr::V4(ip) => Some(ip),
-            IpAddr::V6(_) => None,
-        }
-    })();
-    match routed {
-        Some(ip) if lan.contains(&ip) => Some(ip),
-        _ => lan.iter().find(|ip| ip.is_private()).or(lan.first()).copied(),
-    }
-}
-
 fn bind(port: u16) -> io::Result<TcpListener> {
     TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).or_else(|_| TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))
 }
@@ -447,7 +301,7 @@ pub fn start(
     commands: Sender<remote::Command>,
     ui: egui::Context,
 ) -> Result<Handle, String> {
-    open_log();
+    LOG.open();
     let identity = load_identity(&directory).map_err(|error| error.to_string())?;
     let companion = bind(PORT).map_err(|error| error.to_string())?;
     let port = companion.local_addr().map(|address| address.port()).map_err(|error| error.to_string())?;
@@ -463,24 +317,8 @@ pub fn start(
         ui,
         links: Links::default(),
     });
-    // First announcement right away, to report an error at startup.
-    let first = match local_ip() {
-        Some(ip) => {
-            let (daemon, services) = advertise(&shared, ip, port).map_err(|error| format!("Bonjour: {error}"))?;
-            trace!("announced on {ip}, port {port}");
-            Some(Advert { ip, daemon, services })
-        }
-        None => {
-            trace!("no local network address, announcement pending");
-            None
-        }
-    };
-    let advert = Arc::new(Mutex::new(first));
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let (shared, advert, stop) = (shared.clone(), advert.clone(), stop.clone());
-        std::thread::spawn(move || keep_advertised(shared, port, advert, stop));
-    }
+    let service = shared.clone();
+    let announcement = lan::Announcement::start(&LOG, Box::new(move |ip| service_info(&service, ip, port)))?;
     let connections = Arc::new(AtomicUsize::new(0));
     let session_shared = shared.clone();
     std::thread::spawn(move || {
@@ -496,13 +334,12 @@ pub fn start(
             });
         }
     });
-    Ok(Handle { shared, advert, stop })
+    Ok(Handle { shared, _announcement: announcement })
 }
 
-/// Announces an Apple TV's Companion Link service, on the local network interface only.
-/// The remote only needs Companion Link (atvr4samsung, linux-apple-remote): no fake
-/// MediaRemote or AirPlay services.
-fn advertise(shared: &Shared, ip: Ipv4Addr, port: u16) -> Result<(ServiceDaemon, Vec<String>), mdns_sd::Error> {
+/// Apple TV's Companion Link service. The remote only needs Companion Link
+/// (atvr4samsung, linux-apple-remote): no fake MediaRemote or AirPlay services.
+fn service_info(shared: &Shared, ip: Ipv4Addr, port: u16) -> Result<ServiceInfo, mdns_sd::Error> {
     let identity = &shared.identity;
     let mac = identity.bluetooth();
     let (rp_ha, rp_hn, rp_ad, rp_hi) =
@@ -519,12 +356,6 @@ fn advertise(shared: &Shared, ip: Ipv4Addr, port: u16) -> Result<(ServiceDaemon,
         ("rpBA", &mac),
         ("rpMRtID", &identity.identifier),
     ];
-    let daemon = ServiceDaemon::new()?;
-    daemon.disable_interface(IfKind::All)?;
-    daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip)))?;
     let host = format!("jf-{}.local.", mac.replace(':', "").to_lowercase());
-    let info = ServiceInfo::new("_companion-link._tcp.local.", &shared.name, &host, IpAddr::V4(ip), port, &txt[..])?;
-    let services = vec![info.get_fullname().to_owned()];
-    daemon.register(info)?;
-    Ok((daemon, services))
+    ServiceInfo::new("_companion-link._tcp.local.", &shared.name, &host, IpAddr::V4(ip), port, &txt[..])
 }

@@ -34,6 +34,8 @@ pub enum Message {
     PlayedSaved(Result<(), String>),
     QuickConnectCode(String),
     LoggedIn(Result<Client, String>),
+    /// Items sent by another Jellyfin app: (items, start index, start position, queue).
+    Cast(Result<Vec<Item>, String>, usize, Option<f64>, remote::Queue),
 }
 
 /// Runs jobs off the interface thread and wakes it when they return.
@@ -79,6 +81,11 @@ pub struct App {
     remote_state: remote::Shared,
     /// jf seen as an Apple TV by the iOS remote.
     apple_tv: Option<crate::atv::Handle>,
+    /// jf seen as a Google TV device by the Android TV remote.
+    android_tv: Option<crate::androidtv::Handle>,
+    /// Commands from other Jellyfin apps, while signed in.
+    cast: Option<crate::cast::Handle>,
+    remote_sender: Sender<remote::Command>,
     remote_inbox: Receiver<remote::Command>,
 
     login: Login,
@@ -123,7 +130,10 @@ impl App {
             raised_subtitles: None,
             remote_state: remote_state.clone(),
             remote_inbox,
+            remote_sender: remote_sender.clone(),
             apple_tv: None,
+            android_tv: None,
+            cast: None,
             login: Login::new(&config.server),
             login_attempt: Arc::default(),
             pages: Vec::new(),
@@ -140,8 +150,13 @@ impl App {
         };
         if !app.config.apple_tv.is_empty() {
             let directory = config::config_dir().join("apple-tv");
-            let started =
-                crate::atv::start(&app.config.apple_tv, directory, remote_state.clone(), remote_sender, ctx.clone());
+            let started = crate::atv::start(
+                &app.config.apple_tv,
+                directory,
+                remote_state.clone(),
+                remote_sender.clone(),
+                ctx.clone(),
+            );
             match started {
                 Ok(handle) => app.apple_tv = Some(handle),
                 Err(error) => app.show_toast(format!(
@@ -149,6 +164,11 @@ impl App {
                     t("Apple TV remote unavailable", "Télécommande Apple TV indisponible")
                 )),
             }
+        }
+        if !app.config.android_tv.is_empty() {
+            let directory = config::config_dir().join("android-tv");
+            let name = app.config.android_tv.clone();
+            app.android_tv = Some(crate::androidtv::start(&name, directory, remote_sender, ctx.clone()));
         }
         if app.config.logged_in() {
             app.set_client(Client::from_config(&app.config));
@@ -163,6 +183,7 @@ impl App {
     fn set_client(&mut self, client: Client) {
         self.images.set_client(Some(client.clone()));
         self.player.set_client(Some(client.clone()));
+        self.cast = Some(crate::cast::start(client.clone(), self.remote_sender.clone(), self.tasks.ctx.clone()));
         self.client = Some(client);
         self.pages.clear();
         self.open(Source::Home);
@@ -212,7 +233,7 @@ impl App {
         let sequence = !section.mixed && matches!(item.kind.as_str(), "Episode" | "Audio" | "TvChannel");
         let (queue, index) = if sequence { (section.items.clone(), page.focus.1) } else { (vec![item.clone()], 0) };
         self.menu = None;
-        self.player.play(queue, index, from_start, &self.tasks);
+        self.player.play(queue, index, from_start.then_some(0.0), &self.tasks);
     }
 
     fn activate(&mut self) {
@@ -331,7 +352,7 @@ impl App {
                 }
                 Message::Shuffled(Ok(items)) => {
                     self.toast = None;
-                    self.player.play(items, 0, true, &self.tasks);
+                    self.player.play(items, 0, Some(0.0), &self.tasks);
                 }
                 Message::Shuffled(Err(error)) => self.show_toast(error),
                 Message::PlayedSaved(result) => {
@@ -340,6 +361,18 @@ impl App {
                     }
                     self.refresh();
                 }
+                Message::Cast(Ok(items), _, _, _) if items.is_empty() => {}
+                Message::Cast(Ok(items), index, start, queue) => {
+                    if queue != remote::Queue::Now && self.player.is_active() {
+                        self.player.enqueue(items, queue == remote::Queue::Next);
+                    } else {
+                        self.menu = None;
+                        self.search = None;
+                        let index = index.min(items.len() - 1);
+                        self.player.play(items, index, start, &self.tasks);
+                    }
+                }
+                Message::Cast(Err(error), ..) => self.show_toast(error),
                 Message::QuickConnectCode(code) => self.login.code = Some(code),
                 Message::LoggedIn(result) => {
                     self.login.busy = false;
@@ -386,7 +419,17 @@ impl App {
             };
             match command {
                 remote::Command::SeekBy(offset) => mpv(&["seek", &offset.to_string(), "relative"]),
+                remote::Command::SeekTo(time) => mpv(&["seek", &time.to_string(), "absolute"]),
                 remote::Command::Track(kind, id) => self.player.select_track(kind, id),
+                remote::Command::Stream(kind, index) => self.player.select_stream(kind, index),
+                remote::Command::Fullscreen => mpv(&["cycle", "fullscreen"]),
+                remote::Command::Notice(text) => self.show_toast(text),
+                remote::Command::Play { ids, index, start, queue } => {
+                    let Some(client) = self.client.clone() else { continue };
+                    self.tasks.spawn(move || {
+                        Message::Cast(client.items_by_ids(&ids).map_err(|e| e.to_string()), index, start, queue)
+                    });
+                }
                 // "Subtitles and audio" panel open: the remote navigates it.
                 remote::Command::Key(key) if playing && self.osd.menu_open() => self.osd.remote_key(&key),
                 remote::Command::Key(key) if playing => match key.as_str() {
@@ -737,8 +780,17 @@ impl eframe::App for App {
         if let Some(notice) = self.apple_tv.as_ref().and_then(crate::atv::Handle::take_notice) {
             self.show_toast(notice);
         }
+        if let Some(notice) = self.android_tv.as_ref().and_then(crate::androidtv::Handle::take_notice) {
+            self.show_toast(notice);
+        }
+        if let Some((code, left)) = self.android_tv.as_ref().and_then(crate::androidtv::Handle::pairing_code) {
+            let hint = t("Enter this code on the Android phone.", "Saisissez ce code sur le téléphone Android.");
+            overlay::pairing_code(ctx, &code, hint);
+            ctx.request_repaint_after(left.min(Duration::from_secs(1)));
+        }
         if let Some((code, left)) = self.apple_tv.as_ref().and_then(crate::atv::Handle::pairing_code) {
-            overlay::pairing_code(ctx, code);
+            let hint = t("Enter this code on the iPhone.", "Saisissez ce code sur l'iPhone.");
+            overlay::pairing_code(ctx, &format!("{code:04}"), hint);
             ctx.request_repaint_after(left.min(Duration::from_secs(1)));
         }
         if let Some((message, since)) = &self.toast {
@@ -759,7 +811,9 @@ impl eframe::App for App {
         // Saves the current position, then frees the renderer while the OpenGL context exists.
         self.player.stop();
         self.player.mpv.free_renderer();
-        // Withdraws the Apple TV announcement from the network.
+        // Withdraws the remote announcements from the network.
         self.apple_tv = None;
+        self.android_tv = None;
+        self.cast = None;
     }
 }

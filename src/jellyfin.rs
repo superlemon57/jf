@@ -222,6 +222,8 @@ impl Item {
 
 /// External subtitle to load in the player.
 pub struct Subtitle {
+    /// Jellyfin stream index.
+    pub index: i64,
     pub url: String,
     pub title: String,
     pub language: String,
@@ -481,6 +483,7 @@ impl Client {
             let extension = TEXT_SUBTITLES.iter().find(|(name, _)| *name == codec).map(|(_, ext)| ext);
             if let (true, true, Some(extension)) = (stream.kind == "Subtitle", stream.is_external, extension) {
                 subtitles.push(Subtitle {
+                    index: stream.index,
                     url: format!(
                         "{}/Videos/{item_id}/{}/Subtitles/{}/Stream.{extension}",
                         self.server, source.id, stream.index
@@ -503,6 +506,39 @@ impl Client {
     pub fn report(&self, event: &str, body: Value) -> Result<()> {
         self.send("POST", &format!("/Sessions/Playing{event}"), &[], Some(body))?;
         Ok(())
+    }
+
+    /// Items by id, in the given order (the server returns them sorted its own way).
+    pub fn items_by_ids(&self, ids: &[String]) -> Result<Vec<Item>> {
+        let mut items = self.items("/Items", &[("Ids", &ids.join(","))])?;
+        items.sort_by_key(|item| ids.iter().position(|id| *id == item.id));
+        Ok(items)
+    }
+
+    // ---------------------------------------------------------------- remote control
+
+    /// Declares jf as a device other Jellyfin apps can play on and control.
+    pub fn send_capabilities(&self, commands: &[&str]) -> Result<()> {
+        let body = json!({
+            "PlayableMediaTypes": ["Video", "Audio"],
+            "SupportedCommands": commands,
+            "SupportsMediaControl": true,
+            "SupportsPersistentIdentifier": true,
+        });
+        self.send("POST", "/Sessions/Capabilities/Full", &[], Some(body))?;
+        Ok(())
+    }
+
+    /// Address and authorization header of the server's WebSocket. The token also goes
+    /// in the address, as jellyfin-web does, for servers that only read it there.
+    pub fn socket(&self) -> (String, String) {
+        let address = match self.server.split_once("://") {
+            Some(("https", rest)) => format!("wss://{rest}"),
+            Some((_, rest)) => format!("ws://{rest}"),
+            None => format!("ws://{}", self.server),
+        };
+        let address = format!("{address}/socket?api_key={}&deviceId={}", self.token, self.device_id);
+        (address, self.authorization())
     }
 
     pub fn image(&self, id: &str, kind: &str, width: u32) -> Result<Vec<u8>> {

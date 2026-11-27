@@ -13,6 +13,8 @@ pub struct Config {
     pub device_id: String,
     /// Name shown for jf in the iOS Apple TV remote; empty to disable it.
     pub apple_tv: String,
+    /// Name shown for jf in the Android TV remote (Google TV app); empty to disable it.
+    pub android_tv: String,
     /// Interface language: "en" (default) or "fr".
     pub language: String,
 }
@@ -25,6 +27,7 @@ impl Default for Config {
             user_id: String::new(),
             device_id: String::new(),
             apple_tv: "jf".into(),
+            android_tv: "jf".into(),
             language: "en".into(),
         }
     }
