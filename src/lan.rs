@@ -137,6 +137,9 @@ impl Advert {
         // Only on the local network interface: never on a VPN or a container bridge.
         daemon.disable_interface(IfKind::All)?;
         daemon.enable_interface(IfKind::Addr(IpAddr::V4(ip)))?;
+        // Real Android TVs announce "_androidtvremote2" (16 bytes), over the 15 that the
+        // library allows by default; it would drop the service without an error.
+        daemon.set_service_name_len_max(30)?;
         let info = make(ip)?;
         let service = info.get_fullname().to_owned();
         daemon.register(info)?;
