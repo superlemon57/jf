@@ -177,6 +177,28 @@ impl std::fmt::Debug for Shared {
     }
 }
 
+impl Clients {
+    /// Checks that the phone holds the key of its certificate. The certificate is not
+    /// parsed by webpki, which refuses the ones Android generates (critical extension).
+    fn verify_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        let invalid = || rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature);
+        let (algorithm, key) = cert::subject_public_key(cert).ok_or_else(invalid)?;
+        let mapping = self.provider.signature_verification_algorithms.mapping;
+        let (_, candidates) = mapping.iter().find(|(scheme, _)| *scheme == dss.scheme).ok_or_else(invalid)?;
+        candidates
+            .iter()
+            .filter(|candidate| candidate.public_key_alg_id().as_ref() == algorithm)
+            .any(|candidate| candidate.verify_signature(key, message, dss.signature()).is_ok())
+            .then(rustls::client::danger::HandshakeSignatureValid::assertion)
+            .ok_or_else(invalid)
+    }
+}
+
 impl ClientCertVerifier for Clients {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         &[]
@@ -203,7 +225,7 @@ impl ClientCertVerifier for Clients {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        self.verify_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -212,7 +234,7 @@ impl ClientCertVerifier for Clients {
         cert: &CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        self.verify_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {

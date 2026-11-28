@@ -111,8 +111,10 @@ fn unsigned(integer: &[u8]) -> Vec<u8> {
     integer.iter().copied().skip_while(|byte| *byte == 0).collect()
 }
 
-/// RSA public key of an X.509 certificate (the phone's); `None` for another key type.
-pub fn certificate_public(certificate: &[u8]) -> Option<PublicKey> {
+/// Public key of an X.509 certificate: (algorithm identifier content, key bits). Read by
+/// hand: phones send certificates that strict parsers refuse (an Android key store
+/// certificate has a critical extension webpki does not know), and only the key matters.
+pub fn subject_public_key(certificate: &[u8]) -> Option<(&[u8], &[u8])> {
     let (0x30, certificate, _) = element(certificate)? else { return None };
     let (0x30, mut tbs, _) = element(certificate)? else { return None };
     // version (optional), serial, signature, issuer, validity, subject, then the key.
@@ -129,13 +131,19 @@ pub fn certificate_public(certificate: &[u8]) -> Option<PublicKey> {
         index += 1;
     };
     let (0x30, algorithm, rest) = element(key)? else { return None };
+    let (0x03, bits, _) = element(rest)? else { return None };
+    Some((algorithm, bits.strip_prefix(&[0])?))
+}
+
+/// RSA public key of an X.509 certificate (the phone's); `None` for another key type.
+pub fn certificate_public(certificate: &[u8]) -> Option<PublicKey> {
+    let (algorithm, key) = subject_public_key(certificate)?;
     let (0x06, oid, _) = element(algorithm)? else { return None };
     // rsaEncryption
     if oid != [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01] {
         return None;
     }
-    let (0x03, bits, _) = element(rest)? else { return None };
-    let (0x30, numbers, _) = element(bits.strip_prefix(&[0])?)? else { return None };
+    let (0x30, numbers, _) = element(key)? else { return None };
     let (0x02, modulus, rest) = element(numbers)? else { return None };
     let (0x02, exponent, _) = element(rest)? else { return None };
     Some(PublicKey { modulus: unsigned(modulus), exponent: unsigned(exponent) })
