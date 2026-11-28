@@ -53,6 +53,10 @@ pub(super) fn secret(phone: &PublicKey, jf: &PublicKey, nonce: &[u8; 2]) -> [u8;
         .into()
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 pub(super) fn serve(mut tls: Tls, shared: &Shared, id: u64) -> io::Result<()> {
     tls.sock.set_read_timeout(Some(Duration::from_millis(500)))?;
     handshake(&mut tls, Duration::from_secs(10))?;
@@ -78,7 +82,7 @@ fn pair(tls: &mut Tls, shared: &Shared, id: u64) -> io::Result<()> {
         let Some(message) = receive(tls, &mut inbox)? else { continue };
         let status = field(&message, 2).and_then(Value::int);
         if status != Some(STATUS_OK) {
-            trace!("#{id}: phone gave up (status {status:?})");
+            trace!("#{id}: phone gave up (status {status:?}, message {})", hex(&message));
             return Ok(());
         }
         if let Some(request) = field(&message, PAIRING_REQUEST).and_then(Value::bytes) {
@@ -86,8 +90,11 @@ fn pair(tls: &mut Tls, shared: &Shared, id: u64) -> io::Result<()> {
             let client = field(request, 2).map(Value::text).unwrap_or_default();
             trace!("#{id}: pairing request from {client:?} ({service})");
             send(tls, &reply(STATUS_OK).message(PAIRING_REQUEST_ACK, Message::new().text(1, &shared.name)))?;
-        } else if field(&message, OPTIONS).is_some() {
-            let options = Message::new().message(1, encoding()).uint(3, ROLE_INPUT);
+        } else if let Some(options) = field(&message, OPTIONS).and_then(Value::bytes) {
+            trace!("#{id}: phone options {}", hex(options));
+            // The phone types the code (input) that jf shows (output): both are offered, the
+            // Google TV app gives up (status 401) without an output encoding.
+            let options = Message::new().message(1, encoding()).message(2, encoding()).uint(3, ROLE_INPUT);
             send(tls, &reply(STATUS_OK).message(OPTIONS, options))?;
         } else if let Some(configuration) = field(&message, CONFIGURATION).and_then(Value::bytes) {
             let chosen = field(configuration, 1).and_then(Value::bytes).unwrap_or_default();
