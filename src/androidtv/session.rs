@@ -29,6 +29,7 @@ const PING_RESPONSE: u32 = 9;
 const KEY_INJECT: u32 = 10;
 const START: u32 = 40;
 const SET_VOLUME_LEVEL: u32 = 50;
+const ADJUST_VOLUME_LEVEL: u32 = 51;
 
 // Key directions.
 const START_LONG: u64 = 1;
@@ -156,8 +157,18 @@ impl Session<'_> {
                 let direction = field(content, 2).and_then(Value::int).unwrap_or(0);
                 self.key(code, direction)?;
             }
+            SET_VOLUME_LEVEL => {
+                let level = field(content, 7).and_then(Value::int);
+                let max = field(content, 6).and_then(Value::int).filter(|max| *max > 0).unwrap_or(100);
+                trace!("#{id}: volume set to {level:?}/{max}");
+                if let Some(level) = level {
+                    remote::set_volume(level.min(max) as f64 / max as f64);
+                }
+                self.send_volume()?;
+            }
+            ADJUST_VOLUME_LEVEL => trace!("#{id}: volume adjust {}", super::hex(content)),
             ERROR => trace!("#{id}: error reported by the phone"),
-            other => trace!("#{id}: message {other} ignored"),
+            other => trace!("#{id}: message {other} ignored ({})", super::hex(content)),
         }
         Ok(())
     }
@@ -203,7 +214,10 @@ impl Session<'_> {
         let Some(volume) = remote::volume() else { return Ok(()) };
         let level = (volume.clamp(0.0, 1.0) * 100.0).round() as u64;
         let muted = u64::from(remote::muted());
-        let content = Message::new().text(3, "jf").uint(6, 100).uint(7, level).uint(8, muted);
+        // Fields 1, 2 and 4 are not understood, but every real device sends them (field 2 is
+        // always 9) and the Google TV app ignores its volume buttons without them.
+        let content =
+            Message::new().uint(1, 1).uint(2, 9).text(3, "jf").uint(4, 1).uint(6, 100).uint(7, level).uint(8, muted);
         self.send(Message::new().message(SET_VOLUME_LEVEL, content))
     }
 }

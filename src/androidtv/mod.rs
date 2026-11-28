@@ -413,3 +413,7 @@ fn service_info(name: &str, mac: &str, ip: Ipv4Addr) -> Result<ServiceInfo, mdns
     let txt = [("bt", mac)];
     ServiceInfo::new("_androidtvremote2._tcp.local.", name, &host, IpAddr::V4(ip), REMOTE_PORT, &txt[..])
 }
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}

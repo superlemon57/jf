@@ -11,7 +11,7 @@ use subtle::ConstantTimeEq;
 
 use super::cert::{self, PublicKey};
 use super::proto::{field, Inbox, Message, Value};
-use super::{finish, handshake, receive, send, trace, Shared, Tls, PAIRING_WINDOW};
+use super::{finish, handshake, hex, receive, send, trace, Shared, Tls, PAIRING_WINDOW};
 
 const PROTOCOL_VERSION: u64 = 2;
 const STATUS_OK: u64 = 200;
@@ -51,10 +51,6 @@ pub(super) fn secret(phone: &PublicKey, jf: &PublicKey, nonce: &[u8; 2]) -> [u8;
         .chain_update(nonce)
         .finalize()
         .into()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub(super) fn serve(mut tls: Tls, shared: &Shared, id: u64) -> io::Result<()> {
